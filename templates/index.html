@@ -1,0 +1,479 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>媒体批量下载 · Media Batch Downloader</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    background: #0B0F17; color: #E5E7EB; min-height: 100vh; padding: 36px 16px 80px;
+  }
+  .wrap { max-width: 1060px; margin: 0 auto; }
+  h1 { font-size: 26px; font-weight: 700; margin-bottom: 6px; }
+  h1 span { background: linear-gradient(90deg,#fff,#3B82F6); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+  .sub { color: #8B94A7; font-size: 13px; margin-bottom: 24px; line-height: 1.7; }
+
+  /* ---- 输入区 ---- */
+  .box {
+    display: flex; gap: 10px; background: #131A26; border: 1px solid #1F2937;
+    border-radius: 12px; padding: 10px; margin-bottom: 12px;
+  }
+  input[type=text], input[type=url] {
+    flex: 1; background: transparent; border: none; outline: none;
+    color: #E5E7EB; font-size: 15px; padding: 10px; min-width: 0;
+  }
+  input::placeholder { color: #5A657A; }
+  button {
+    background: #3B82F6; color: #fff; border: none; border-radius: 8px;
+    padding: 10px 20px; font-size: 14px; font-weight: 600; cursor: pointer; transition: .15s;
+  }
+  button:hover { background: #2563EB; }
+  button:disabled { background: #374151; cursor: not-allowed; }
+  button.ghost { background: transparent; border: 1px solid #374151; color: #9AA3B2; }
+  button.ghost:hover { border-color: #3B82F6; color: #3B82F6; background: rgba(59,130,246,.08); }
+  button.success { background: #22C55E; }
+  button.success:hover { background: #16A34A; }
+  button.warn { background: #F59E0B; }
+  button.warn:hover { background: #D97706; }
+
+  .toolbar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+  .toolbar .gear { background: transparent; border: 1px solid #374151; color: #9AA3B2; padding: 10px 14px; }
+  .toolbar .gear:hover { color: #fff; border-color: #5A657A; }
+
+  /* ---- 设置面板 ---- */
+  #settings {
+    display: none; background: #131A26; border: 1px solid #1F2937; border-radius: 12px;
+    padding: 18px 20px; margin-bottom: 18px;
+  }
+  #settings.open { display: block; }
+  .set-row { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; margin-bottom: 12px; }
+  .set-row:last-child { margin-bottom: 0; }
+  .set-row label { font-size: 13px; color: #8B94A7; min-width: 88px; }
+  .set-row input[type=text] { flex: 1; min-width: 220px; background: #0B0F17; border: 1px solid #1F2937; border-radius: 8px; padding: 9px 12px; font-size: 14px; }
+  .set-hint { font-size: 12px; color: #5A657A; line-height: 1.7; margin-top: 10px; }
+
+  /* switch */
+  .switch { position: relative; width: 42px; height: 24px; display: inline-block; }
+  .switch input { opacity: 0; width: 0; height: 0; }
+  .slider { position: absolute; inset: 0; background: #374151; border-radius: 999px; transition: .2s; cursor: pointer; }
+  .slider::before { content: ""; position: absolute; width: 18px; height: 18px; left: 3px; top: 3px; background: #fff; border-radius: 50%; transition: .2s; }
+  .switch input:checked + .slider { background: #3B82F6; }
+  .switch input:checked + .slider::before { transform: translateX(18px); }
+
+  /* ---- 状态 ---- */
+  #status { font-size: 14px; color: #8B94A7; min-height: 20px; margin: 12px 0 16px; }
+  #status.err { color: #F87171; }
+  #status.ok { color: #4ADE80; }
+
+  .spinner {
+    display: inline-block; width: 14px; height: 14px; border: 2px solid #3B82F6;
+    border-top-color: transparent; border-radius: 50%; animation: spin .7s linear infinite;
+    vertical-align: middle; margin-right: 8px;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* ---- 结果区 ---- */
+  #panel { display: none; margin-top: 8px; }
+  #panel.show { display: block; }
+
+  .summary {
+    display: flex; gap: 14px; align-items: center; flex-wrap: wrap;
+    background: #131A26; border: 1px solid #1F2937; border-radius: 12px;
+    padding: 12px 16px; margin-bottom: 12px;
+  }
+  .badge {
+    font-size: 12px; padding: 3px 10px; border-radius: 999px; font-weight: 600;
+  }
+  .badge.bluesky { background: rgba(0,149,255,.15); color: #7EC7FF; }
+  .badge.twitter { background: rgba(29,155,240,.15); color: #7EC7FF; }
+  .badge.youtube { background: rgba(255,0,0,.15); color: #FF7B7B; }
+  .badge.url { background: rgba(139,148,167,.15); color: #9AA3B2; }
+  .badge.gray { background: rgba(139,148,167,.15); color: #9AA3B2; }
+  .summary .name { font-weight: 700; font-size: 15px; }
+  .summary .count { color: #8B94A7; font-size: 13px; }
+  .summary .spacer { flex: 1; }
+
+  /* tabs */
+  .tabs { display: flex; gap: 6px; margin-bottom: 14px; flex-wrap: wrap; }
+  .tab {
+    padding: 7px 16px; border-radius: 999px; font-size: 13px; font-weight: 600;
+    cursor: pointer; border: 1px solid #1F2937; color: #8B94A7; background: transparent; transition: .15s;
+  }
+  .tab.active { background: #3B82F6; border-color: #3B82F6; color: #fff; }
+  .tab .n { opacity: .75; }
+
+  /* grid */
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 14px; }
+  .card {
+    background: #131A26; border: 2px solid #1F2937; border-radius: 12px; overflow: hidden;
+    display: flex; flex-direction: column; cursor: pointer; position: relative; transition: .15s;
+  }
+  .card:hover { border-color: #374151; }
+  .card.selected { border-color: #3B82F6; box-shadow: 0 0 0 1px #3B82F6; }
+  .thumb { position: relative; width: 100%; aspect-ratio: 4/3; background: #000; }
+  .thumb img, .thumb video { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .thumb .empty { width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; color: #374151; font-size: 32px; }
+  .check {
+    position: absolute; top: 8px; left: 8px; width: 22px; height: 22px; border-radius: 6px;
+    background: rgba(11,15,23,.75); border: 2px solid #5A657A; display: flex; align-items: center; justify-content: center;
+    font-size: 13px; color: transparent; transition: .12s;
+  }
+  .card.selected .check { background: #3B82F6; border-color: #3B82F6; color: #fff; }
+  .type-badge {
+    position: absolute; top: 8px; right: 8px; font-size: 11px; font-weight: 700;
+    padding: 2px 8px; border-radius: 999px; background: rgba(11,15,23,.8);
+  }
+  .type-badge.image { color: #7EC7FF; border: 1px solid #3B82F6; }
+  .type-badge.video { color: #FFB74D; border: 1px solid #F59E0B; }
+  .type-badge.gif { color: #FF8FAB; border: 1px solid #EC4899; }
+  .meta { padding: 8px 10px 10px; }
+  .meta .title {
+    font-size: 12px; color: #C7CEDB; line-height: 1.5; display: -webkit-box;
+    -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; min-height: 36px;
+  }
+  .meta .date { font-size: 11px; color: #5A657A; margin-top: 4px; }
+
+  /* progress */
+  #progress-wrap { display: none; margin: 14px 0; background: #131A26; border: 1px solid #1F2937; border-radius: 12px; padding: 14px 16px; }
+  #progress-wrap.show { display: block; }
+  .pbar { height: 10px; background: #1F2937; border-radius: 999px; overflow: hidden; }
+  .pbar > div { height: 100%; width: 0; background: linear-gradient(90deg,#3B82F6,#22C55E); border-radius: 999px; transition: width .3s; }
+  .ptext { display: flex; justify-content: space-between; font-size: 12px; color: #8B94A7; margin-top: 8px; }
+
+  /* results */
+  #results { margin-top: 16px; }
+  #results h3 { font-size: 15px; margin-bottom: 10px; color: #C7CEDB; }
+  .r-item {
+    display: flex; gap: 12px; align-items: center; background: #131A26;
+    border: 1px solid #1F2937; border-radius: 10px; padding: 8px 12px; margin-bottom: 8px;
+  }
+  .r-item .rt { flex: 1; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .r-item .rb { font-size: 12px; color: #5A657A; margin-right: 10px; white-space: nowrap; }
+  .r-item a.dl {
+    color: #3B82F6; text-decoration: none; font-weight: 600; font-size: 13px;
+    border: 1px solid #3B82F6; border-radius: 6px; padding: 4px 12px; white-space: nowrap; transition: .15s;
+  }
+  .r-item a.dl:hover { background: #3B82F6; color: #fff; }
+  .r-item .err { color: #F87171; font-size: 12px; }
+  .rerr { color: #F87171; font-size: 12px; margin-top: 6px; }
+
+  .tips { margin-top: 28px; font-size: 12px; color: #5A657A; line-height: 1.9; border-top: 1px solid #1F2937; padding-top: 16px; }
+  .tips b { color: #8B94A7; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>媒体<span>批量下载器</span></h1>
+  <div class="sub">输入用户主页或单条链接，扫描图片 / 视频 / GIF，勾选后批量下载到本机</div>
+
+  <div class="box">
+    <input id="url" placeholder="例如 https://bsky.app/profile/xxx  或 https://x.com/xxx  或 YouTube 频道 / 推文 / 图片链接" autofocus
+           onkeydown="if(event.key==='Enter')scan()">
+  </div>
+  <div class="toolbar">
+    <button id="btn-scan" onclick="scan()">🔍 扫描</button>
+    <button class="gear" onclick="toggleSettings()">⚙️ 代理 / 设置</button>
+  </div>
+
+  <div id="settings">
+    <div class="set-row">
+      <label>代理开关</label>
+      <span class="switch"><input type="checkbox" id="proxy_enabled" onchange="markDirty()"><span class="slider"></span></span>
+      <span style="font-size:12px;color:#8B94A7">走代理访问外网媒体（如 clash/v2ray 的 HTTP 端口）</span>
+    </div>
+    <div class="set-row">
+      <label>代理地址</label>
+      <input type="text" id="proxy" placeholder="http://127.0.0.1:7890  或  socks5://127.0.0.1:7891" oninput="markDirty()">
+    </div>
+    <div class="set-row">
+      <label>Nitter 实例</label>
+      <textarea id="nitter_instances" rows="3" placeholder="每行一个，越靠前越优先。例如：&#10;https://xcancel.com&#10;https://nitter.tiekoetter.com" oninput="markDirty()" style="flex:1;min-width:220px;background:#0B0F17;border:1px solid #1F2937;border-radius:8px;padding:9px 12px;font-size:14px;color:#E5E7EB;resize:vertical"></textarea>
+    </div>
+    <div class="set-row">
+      <label>单文件上限</label>
+      <input type="text" id="max_mb" placeholder="200 (MB)" oninput="markDirty()">
+      <label style="min-width:auto">最多条数</label>
+      <input type="text" id="max_items" placeholder="300" oninput="markDirty()" style="min-width:90px">
+    </div>
+    <div class="set-row">
+      <button class="success" onclick="saveConfig()">💾 保存设置</button>
+      <span id="cfg-status" style="font-size:13px;color:#8B94A7"></span>
+    </div>
+    <div class="set-hint">
+      代理填本地代理软件的 HTTP/SOCKS 地址即可（如 clash 7890）。<br>
+      Twitter 用户首页依赖 Nitter 实例（自动逐个尝试上面的列表）；没有可用实例时可用 Docker 自建：<code>docker run -d -p 8080:8080 zedeus/nitter</code>。单条推文 / Bluesky / YouTube 不需要 Nitter。
+    </div>
+  </div>
+
+  <div id="status"></div>
+
+  <div id="panel">
+    <div class="summary">
+      <span class="badge" id="p-badge">-</span>
+      <span class="name" id="p-name">-</span>
+      <span class="count" id="p-count"></span>
+      <span class="spacer"></span>
+      <button class="ghost" onclick="selAll()">全选</button>
+      <button class="ghost" onclick="selNone()">清空</button>
+      <button id="btn-dl" class="success" onclick="download()">⬇️ 下载选中(0)</button>
+    </div>
+
+    <div class="tabs" id="tabs"></div>
+    <div class="grid" id="grid"></div>
+  </div>
+
+  <div id="progress-wrap">
+    <div class="pbar"><div id="pbar-inner"></div></div>
+    <div class="ptext">
+      <span id="p-current">准备中...</span>
+      <span id="p-num">0/0</span>
+    </div>
+  </div>
+
+  <div id="results"></div>
+
+  <div class="tips">
+    <b>支持的平台：</b>Bluesky 用户主页（免登录全解析）· Twitter 单条推文（fxtwitter）· Twitter 用户首页（需 Nitter 实例）· YouTube 频道 / 播放列表（需 yt-dlp）· 图片/GIF 直链<br>
+    <b>流程：</b>粘贴链接 → 扫描出缩略图 → 勾选需要的资源（可切换 图片/视频/GIF 专区）→ 下载选中 → 逐条保存或打包 ZIP<br>
+    <b>提示：</b>扫描只获取缩略图，点「下载选中」才开始真正下载；文件保存在本程序 downloads/ 目录
+  </div>
+</div>
+
+<script>
+let items = [];
+let selected = new Set();
+let filter = 'all';
+let cfgDirty = false;
+let pollTimer = null;
+
+const $ = id => document.getElementById(id);
+const typeName = t => t === 'video' ? '视频' : (t === 'gif' ? 'GIF' : '图片');
+const typeClass = t => t === 'video' ? 'video' : (t === 'gif' ? 'gif' : 'image');
+const fmtSize = b => b ? (b / 1024).toFixed(0) + ' KB' : '';
+const esc = s => String(s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+
+function setStatus(msg, cls) {
+  const s = $('status');
+  s.innerHTML = msg;
+  s.className = cls || '';
+}
+
+function toggleSettings() {
+  $('settings').classList.toggle('open');
+  if (!$('settings').classList.contains('open') && cfgDirty) saveConfig();
+}
+
+function markDirty() { cfgDirty = true; }
+
+async function loadConfig() {
+  try {
+    const r = await fetch('/api/config');
+    const d = await r.json();
+    if (d.ok) {
+      $('proxy_enabled').checked = !!d.config.proxy_enabled;
+      $('proxy').value = d.config.proxy || '';
+      $('nitter_instances').value = (d.config.nitter_instances || []).join('\n');
+      $('max_mb').value = d.config.max_mb || 200;
+      $('max_items').value = d.config.max_items || 300;
+    }
+  } catch (e) {}
+}
+
+async function saveConfig() {
+  const body = {
+    proxy_enabled: $('proxy_enabled').checked,
+    proxy: $('proxy').value.trim(),
+    nitter_instances: $('nitter_instances').value.split('\n').map(s => s.trim()).filter(Boolean),
+    max_mb: parseInt($('max_mb').value) || 200,
+    max_items: parseInt($('max_items').value) || 300,
+  };
+  try {
+    const r = await fetch('/api/config', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
+    const d = await r.json();
+    const st = $('cfg-status');
+    if (d.ok) { st.textContent = '✅ 已保存'; cfgDirty = false; }
+    else st.textContent = '❌ ' + d.error;
+    setTimeout(() => st.textContent = '', 2000);
+  } catch (e) { $('cfg-status').textContent = '❌ 保存失败'; }
+}
+
+async function scan() {
+  const url = $('url').value.trim();
+  const btn = $('btn-scan');
+  if (!url) { setStatus('请先输入链接', 'err'); return; }
+  if (cfgDirty) await saveConfig();
+  btn.disabled = true;
+  clearResults();
+  items = []; selected.clear();
+  $('panel').classList.remove('show');
+  $('progress-wrap').classList.remove('show');
+  setStatus('<span class="spinner"></span>扫描中，请稍候...');
+  try {
+    const r = await fetch('/api/scan', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({url})});
+    const d = await r.json();
+    if (!d.ok) { setStatus('❌ ' + d.error, 'err'); return; }
+    items = d.items;
+    render();
+    setStatus('✅ 扫描到 ' + items.length + ' 个媒体资源');
+  } catch (e) {
+    setStatus('❌ 请求失败: ' + e, 'err');
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+function render() {
+  // badge
+  const b = $('p-badge');
+  const plat = items.length ? items[0].platform : '';
+  const map = {bluesky:['Bluesky','bluesky'], twitter:['Twitter','twitter'], youtube:['YouTube','youtube'], url:['直链','url']};
+  const [label, cls] = map[plat] || ['未知','gray'];
+  b.textContent = label; b.className = 'badge ' + cls;
+  $('p-name').textContent = items.length ? (items[0].page ? url2name(items[0].page) : '') : '';
+  $('p-count').textContent = `共 ${items.length} 项`;
+
+  // tabs
+  const counts = {all: items.length, image: 0, video: 0, gif: 0};
+  items.forEach(i => { if (counts[i.type] != null) counts[i.type]++; });
+  const tabs = $('tabs');
+  tabs.innerHTML = '';
+  const defs = [['all','全部', counts.all], ['image','🖼️ 图片', counts.image], ['video','🎬 视频', counts.video], ['gif','🎞️ GIF', counts.gif]];
+  defs.forEach(([k, label, n]) => {
+    const t = document.createElement('button');
+    t.className = 'tab' + (filter === k ? ' active' : '');
+    t.innerHTML = `${label} <span class="n">${n}</span>`;
+    t.onclick = () => { filter = k; render(); };
+    tabs.appendChild(t);
+  });
+
+  // grid
+  const grid = $('grid');
+  grid.innerHTML = '';
+  const shown = items.filter(i => filter === 'all' || i.type === filter);
+  if (!shown.length) { grid.innerHTML = '<div style="color:#5A657A;font-size:13px;grid-column:1/-1">该专区暂无资源</div>'; }
+  shown.forEach(i => {
+    const card = document.createElement('div');
+    card.className = 'card' + (selected.has(i.id) ? ' selected' : '');
+    const thumb = i.thumb
+      ? (i.type === 'video' ? `<video src="${esc(i.thumb)}" muted playsinline preload="metadata"></video>` : `<img src="${esc(i.thumb)}" loading="lazy" onerror="this.style.display='none'">`)
+      : `<div class="empty">${i.type === 'video' ? '🎬' : (i.type === 'gif' ? '🎞️' : '🖼️')}</div>`;
+    card.innerHTML = `
+      <div class="thumb">
+        ${thumb}
+        <div class="check">✓</div>
+        <div class="type-badge ${typeClass(i.type)}">${typeName(i.type)}</div>
+      </div>
+      <div class="meta">
+        <div class="title">${esc(i.title) || '无标题'}</div>
+        <div class="date">${esc(i.date || '')}</div>
+      </div>`;
+    card.onclick = () => toggleSel(i.id);
+    grid.appendChild(card);
+  });
+
+  // summary
+  const btn = $('btn-dl');
+  btn.textContent = `⬇️ 下载选中(${selected.size})`;
+  btn.disabled = selected.size === 0;
+  $('panel').classList.add('show');
+}
+
+function url2name(u) {
+  const m = u.match(/(?:profile|\.com|\.app)\/([^/?#]+)/);
+  return m ? m[1] : '';
+}
+
+function toggleSel(id) {
+  if (selected.has(id)) selected.delete(id); else selected.add(id);
+  render();
+}
+
+function selAll() {
+  items.forEach(i => { if (filter === 'all' || i.type === filter) selected.add(i.id); });
+  render();
+}
+
+function selNone() { selected.clear(); render(); }
+
+function clearResults() {
+  $('results').innerHTML = '';
+  if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+  $('progress-wrap').classList.remove('show');
+}
+
+async function download() {
+  const sel = items.filter(i => selected.has(i.id));
+  if (!sel.length) return;
+  clearResults();
+  const r = await fetch('/api/download', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({items: sel})});
+  const d = await r.json();
+  if (!d.ok) { setStatus('❌ ' + d.error, 'err'); return; }
+  setStatus('⬇️ 开始批量下载...');
+  $('progress-wrap').classList.add('show');
+  poll(d.job_id);
+}
+
+function poll(jobId) {
+  if (pollTimer) clearInterval(pollTimer);
+  pollTimer = setInterval(async () => {
+    try {
+      const r = await fetch('/api/progress/' + jobId);
+      const d = await r.json();
+      if (!d.ok) { setStatus('❌ ' + d.error, 'err'); clearInterval(pollTimer); return; }
+      const pct = d.total ? Math.round(d.done / d.total * 100) : 0;
+      $('pbar-inner').style.width = pct + '%';
+      $('p-num').textContent = `${d.done}/${d.total}`;
+      $('p-current').textContent = d.status === 'running' ? (d.current ? '正在下载：' + d.current : '正在下载...') : '完成';
+      if (d.status !== 'running') {
+        clearInterval(pollTimer);
+        renderResults(d);
+        setStatus(d.errors && d.errors.length
+          ? `✅ 完成：成功 ${d.results.length} / 失败 ${d.errors.length}`
+          : `✅ 全部下载完成，共 ${d.results.length} 个文件`, 'ok');
+      }
+    } catch (e) {
+      clearInterval(pollTimer);
+      setStatus('❌ 进度获取失败: ' + e, 'err');
+    }
+  }, 600);
+}
+
+function renderResults(d) {
+  const box = $('results');
+  let html = '';
+  if (d.results.length) {
+    html += '<h3>📁 已保存的文件（保存到本机或打包 ZIP）</h3>';
+    d.results.forEach(r => {
+      html += `<div class="r-item">
+        <span class="rt">${esc(r.title)}</span>
+        <span class="rb">${fmtSize(r.size)}</span>
+        <a class="dl" href="${r.download}">💾 保存</a>
+      </div>`;
+    });
+    html += `<div style="margin-top:10px">
+      <button class="warn" onclick="downloadZip()">📦 打包全部 ZIP</button>
+    </div>`;
+  }
+  if (d.errors.length) {
+    html += '<div class="rerr">失败 ' + d.errors.length + ' 项：' +
+      d.errors.map(e => `【${esc(e.title)}】${esc(e.error)}`).join('； ') + '</div>';
+  }
+  if (!html) html = '<div style="color:#8B94A7;font-size:13px">没有下载任何文件</div>';
+  box.innerHTML = html;
+  window.dlFiles = d.results.map(r => r.file);
+}
+
+async function downloadZip() {
+  if (!window.dlFiles || !window.dlFiles.length) return;
+  const r = await fetch('/api/zip', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({files: window.dlFiles})});
+  const d = await r.json();
+  if (d.ok) { window.location = d.download; }
+  else setStatus('❌ ' + d.error, 'err');
+}
+
+loadConfig();
+</script>
+</body>
+</html>
