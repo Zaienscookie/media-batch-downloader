@@ -13,6 +13,8 @@ import sys
 import json
 import uuid
 import time
+import base64
+import queue
 import shutil
 import zipfile
 import threading
@@ -22,7 +24,7 @@ import urllib.parse
 from concurrent.futures import ThreadPoolExecutor
 
 import aiohttp
-from flask import Flask, request, jsonify, send_file, render_template
+from flask import Flask, request, jsonify, send_file, render_template, Response
 from bs4 import BeautifulSoup
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -68,6 +70,8 @@ DEFAULT_CONFIG = {
         "https://nitter.net",
     ],
     "twitter_bearer": "",
+    "twitter_auth_token": "",
+    "twitter_ct0": "",
 }
 
 _CONFIG_LOCK = threading.Lock()
@@ -566,31 +570,198 @@ def parse_nitter(html, base, handle):
     return items, cursor
 
 
-async def scan_twitter_user(session, handle, proxy, cfg, max_items):
-    handle = handle.strip().lstrip("@")
-    if not handle:
-        raise ScanError("无效的 Twitter 用户名")
+TW_GQL = "https://x.com/i/api/graphql"
+TW_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+         "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36")
+TW_BEARER = ("AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs"
+             "%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA")
+TW_Q_SCREEN = "Gb-d6r0vxPOADdG62OEBpQ"      # UserByScreenName
+TW_Q_MEDIA = "VyudDWQnr9vJNw7GasFz2g"        # UserMedia
 
-    # 先用 fxtwitter 校验账号是否存在、是否受保护（尽力而为，不影响扫描）
-    try:
-        async with session.get(f"{FX_API}/{handle}", proxy=req_proxy(proxy),
-                               headers=HEADERS, timeout=aiohttp.ClientTimeout(total=20)) as r:
-            if r.status == 200:
-                ud = await r.json()
-                u = ud.get("user") or {}
-                if u.get("protected"):
-                    raise ScanError(f"@{handle} 是受保护账号（仅粉丝可见），无法公开扫描媒体")
-    except ScanError:
-        raise
-    except Exception:
-        pass
+TW_FEATURES = {
+    "rweb_video_screen_enabled": False, "rweb_cashtags_enabled": True,
+    "profile_label_improvements_pcf_label_in_post_enabled": True,
+    "responsive_web_profile_redirect_enabled": False,
+    "rweb_tipjar_consumption_enabled": False, "verified_phone_label_enabled": False,
+    "creator_subscriptions_tweet_preview_api_enabled": True,
+    "responsive_web_graphql_timeline_navigation_enabled": True,
+    "responsive_web_graphql_skip_user_profile_image_extensions_enabled": False,
+    "premium_content_api_read_enabled": False,
+    "communities_web_enable_tweet_community_results_fetch": True,
+    "c9s_tweet_anatomy_moderator_badge_enabled": True,
+    "c9s_list_members_action_api_enabled": False, "c9s_superc9s_indication_enabled": False,
+    "responsive_web_grok_analyze_button_fetch_trends_enabled": False,
+    "responsive_web_grok_analyze_post_followups_enabled": True,
+    "rweb_cashtags_composer_attachment_enabled": True, "responsive_web_jetfuel_frame": True,
+    "responsive_web_grok_share_attachment_enabled": True,
+    "responsive_web_grok_annotations_enabled": True, "articles_preview_enabled": True,
+    "responsive_web_edit_tweet_api_enabled": True,
+    "rweb_conversational_replies_downvote_enabled": False,
+    "graphql_is_translatable_rweb_tweet_is_translatable_enabled": True,
+    "view_counts_everywhere_api_enabled": True,
+    "longform_notetweets_consumption_enabled": True,
+    "responsive_web_twitter_article_tweet_consumption_enabled": True,
+    "content_disclosure_indicator_enabled": True,
+    "content_disclosure_ai_generated_indicator_enabled": True,
+    "responsive_web_grok_show_grok_translated_post": True,
+    "responsive_web_grok_analysis_button_from_backend": True,
+    "post_ctas_fetch_enabled": True, "freedom_of_speech_not_reach_fetch_enabled": True,
+    "standardized_nudges_misinfo": True,
+    "tweet_with_visibility_results_prefer_gql_limited_actions_policy_enabled": True,
+    "longform_notetweets_rich_text_read_enabled": True,
+    "longform_notetweets_inline_media_enabled": False,
+    "responsive_web_grok_image_annotation_enabled": True,
+    "responsive_web_grok_imagine_annotation_enabled": True,
+    "responsive_web_grok_community_note_auto_translation_is_enabled": True,
+    "responsive_web_enhance_cards_enabled": False,
+}
 
+TW_TOGGLES = {
+    "withArticleRichContentState": True, "withArticlePlainText": False,
+    "withGrokAnalyze": False, "withDisallowedReplyControls": False,
+}
+
+
+def _tw_headers(cfg):
+    ct0 = cfg.get("twitter_ct0") or ""
+    at = cfg.get("twitter_auth_token") or ""
+    return {
+        "User-Agent": TW_UA,
+        "accept": "*/*",
+        "authorization": "Bearer " + TW_BEARER,
+        "x-csrf-token": ct0,
+        "cookie": f"auth_token={at}; ct0={ct0}",
+    }
+
+
+async def _tw_graphql(session, qid, operation, variables, cfg, proxy):
+    params = {
+        "variables": json.dumps(variables),
+        "features": json.dumps(TW_FEATURES),
+        "fieldToggles": json.dumps(TW_TOGGLES),
+    }
+    url = f"{TW_GQL}/{qid}/{operation}?" + urllib.parse.urlencode(params)
+    async with session.get(url, proxy=req_proxy(proxy), headers=_tw_headers(cfg),
+                           timeout=aiohttp.ClientTimeout(total=30)) as r:
+        if r.status == 429:
+            raise ScanError("Twitter 接口限流(429)，请稍后再试")
+        if r.status != 200:
+            raise ScanError(f"Twitter GraphQL HTTP {r.status}")
+        return await r.json()
+
+
+def _extract_tw_media(tr, handle):
+    out = []
+    if tr.get("__typename") == "TweetWithVisibilityResults":
+        tr = tr.get("tweet") or tr
+    leg = tr.get("legacy") or {}
+    rest_id = tr.get("rest_id") or leg.get("id_str")
+    text = clip(leg.get("full_text") or "")
+    date = leg.get("created_at") or ""
+    page = f"https://x.com/{handle}/status/{rest_id}" if rest_id else ""
+    medias = ((leg.get("extended_entities") or {}).get("media")
+              or (leg.get("entities") or {}).get("media") or [])
+    for m in medias:
+        mu = m.get("media_url_https") or ""
+        mt = m.get("type") or ""
+        if not mu:
+            continue
+        if mt == "photo":
+            full = re.sub(r"\?.*$", "", mu) + "?name=large"
+            out.append(mk_item("twitter", "image", text or "图片", full, mu, page, date))
+        elif mt in ("video", "animated_gif"):
+            variants = (m.get("video_info") or {}).get("variants") or []
+            mp4s = [v for v in variants if v.get("url") and v.get("content_type") == "video/mp4"]
+            url = ""
+            if mp4s:
+                url = max(mp4s, key=lambda v: v.get("bitrate") or 0)["url"]
+            else:
+                for v in variants:
+                    if v.get("url"):
+                        url = v["url"]
+                        break
+            if url:
+                g = "gif" if mt == "animated_gif" else "video"
+                w = int((m.get("original_info") or {}).get("width", 0) or 0)
+                h = int((m.get("original_info") or {}).get("height", 0) or 0)
+                out.append(mk_item("twitter", g, text or "视频", url, mu, page, date, w, h))
+    return out
+
+
+async def scan_twitter_graphql(session, handle, proxy, cfg, max_items):
+    d = await _tw_graphql(session, TW_Q_SCREEN, "UserByScreenName",
+                          {"screen_name": handle, "withGrokTranslatedBio": False}, cfg, proxy)
+    user = ((d.get("data") or {}).get("user") or {}).get("result") or {}
+    if not user:
+        raise ScanError(f"找不到账号 @{handle}")
+    if user.get("suspended") or user.get("unavailable_reason"):
+        raise ScanError(f"@{handle} 已停用或不可用")
+    if user.get("legacy", {}).get("protected"):
+        raise ScanError(f"@{handle} 是受保护账号（仅粉丝可见）")
+    rid = user.get("rest_id")
+    if not rid:
+        raise ScanError(f"无法获取 @{handle} 的 ID")
+
+    base_vars = {
+        "includePromotedContent": False, "withQuickPromoteEligibilityTweetFields": True,
+        "withSuperFollowsUserFields": True, "withSuperFollowsTweetFields": True,
+        "withUserResults": True, "withNewUserResults": True, "withBirdwatchPivots": False,
+        "withBirdwatchNotes": True, "withReactionsMetadata": False,
+        "withReactionsPerspective": False, "withVoice": True, "withV": True,
+        "countWithTweetCount": True, "withTweetResultCount": True,
+        "withSafetyModeUserFields": True, "withHighlightedLabel": True,
+        "withTweetQuoteCount": True, "includeReplyCount": True,
+    }
+    items = []
+    cursor = None
+    for _ in range(10):
+        if len(items) >= max_items:
+            break
+        variables = dict(base_vars)
+        variables.update({"userId": rid, "count": 40, "cursor": cursor})
+        d = await _tw_graphql(session, TW_Q_MEDIA, "UserMedia", variables, cfg, proxy)
+        tl = ((((d.get("data") or {}).get("user") or {}).get("result") or {})
+              .get("timeline") or {}).get("timeline") or {}
+        instructions = tl.get("instructions") or []
+        got = False
+        for ins in instructions:
+            if ins.get("type") != "TimelineAddEntries":
+                continue
+            for e in ins.get("entries", []):
+                c = e.get("content") or {}
+                ctype = c.get("__typename")
+                if ctype == "TimelineTimelineCursor":
+                    if c.get("cursorType") in ("Bottom", "ShowMore", "Top"):
+                        cursor = c.get("value")
+                elif ctype == "TimelineTimelineModule":
+                    for it in c.get("items", []):
+                        ic = (it.get("item") or {}).get("itemContent") or {}
+                        tr = (ic.get("tweet_results") or {}).get("result") or {}
+                        got = True
+                        items.extend(_extract_tw_media(tr, handle))
+                        if len(items) >= max_items:
+                            break
+                elif ctype == "TimelineTweet":
+                    tr = (c.get("tweet_results") or {}).get("result") or {}
+                    got = True
+                    items.extend(_extract_tw_media(tr, handle))
+            if len(items) >= max_items:
+                break
+        if not got and items:
+            break
+        if not cursor:
+            break
+    if not items:
+        raise ScanError(f"@{handle} 没有可下载的媒体（或接口返回受限）")
+    return items[:max_items]
+
+
+async def scan_twitter_nitter_auto(session, handle, proxy, cfg, max_items):
     candidates = []
     override = (cfg.get("nitter_instance") or "").strip().rstrip("/")
     if override:
         candidates.append(override)
     candidates += [x.strip().rstrip("/") for x in (cfg.get("nitter_instances") or []) if x.strip()]
-
     errs = []
     for base in candidates:
         try:
@@ -601,15 +772,19 @@ async def scan_twitter_user(session, handle, proxy, cfg, max_items):
             raise ScanError(f"Twitter 用户首页扫描失败：{e}")
     if not errs:
         errs.append("未配置任何 Nitter 实例")
-    raise ScanError(
-        "Twitter 用户首页扫描失败：以下 Nitter 实例均不可用——\n"
-        + "\n".join("  · " + e for e in errs)
-        + "\n\n解决办法：\n"
-        "① 在页面 ⚙️ 设置里填一个可用的 Nitter 实例地址（每行一个，越靠前越优先）\n"
-        "② 用 Docker 自建一个（推荐，你已有服务器）：\n"
-        "      docker run -d -p 8080:8080 zedeus/nitter\n"
-        "      然后在设置里填 http://127.0.0.1:8080\n"
-        "③ 或者直接粘贴单条推文链接 https://x.com/xxx/status/123（走 fxtwitter，无需 Nitter）")
+    raise ScanError("Twitter 用户首页扫描失败：以下 Nitter 实例均不可用——\n"
+                    + "\n".join("  · " + e for e in errs))
+
+
+async def scan_twitter_user(session, handle, proxy, cfg, max_items):
+    handle = handle.strip().lstrip("@")
+    if not handle:
+        raise ScanError("无效的 Twitter 用户名")
+    if not (cfg.get("twitter_auth_token") and cfg.get("twitter_ct0")):
+        raise ScanError(
+            "扫 Twitter 用户首页需要配置会话：请在 ⚙️ 设置里填 Twitter 的 auth_token 和 ct0 "
+            "（浏览器登录 x.com → F12 → Application → Cookies 复制这两个值）")
+    return await scan_twitter_graphql(session, handle, proxy, cfg, max_items)
 
 
 async def scan_youtube(session, url, proxy, max_items):
@@ -698,13 +873,15 @@ def api_config():
     patch = request.get_json(silent=True) or {}
     cfg = get_config()
     keys = ("proxy_enabled", "proxy", "max_mb", "max_items",
-            "nitter_instance", "nitter_instances", "twitter_bearer")
+            "nitter_instance", "nitter_instances", "twitter_bearer",
+            "twitter_auth_token", "twitter_ct0")
     for k in keys:
         if k in patch:
             cfg[k] = patch[k]
     save_config(cfg)
     out = dict(cfg)
-    out.pop("twitter_bearer", None)
+    for secret in ("twitter_bearer", "twitter_auth_token", "twitter_ct0"):
+        out.pop(secret, None)
     return jsonify({"ok": True, "config": out})
 
 
@@ -832,6 +1009,139 @@ def api_zip():
         return jsonify({"ok": False, "error": f"打包失败: {e}"})
     return jsonify({"ok": True, "file": zname, "size": os.path.getsize(zpath),
                     "download": f"/media/{zname}?dl=1"})
+
+
+def _stream_filename(title, ext):
+    t = re.sub(r'[\\/:*?"<>|\r\n\t ]+', "_", (title or "")).strip("_")
+    return (t[:60] or "download") + ext
+
+
+async def _hls_seg_urls(session, master_url, proxy):
+    async with session.get(master_url, proxy=req_proxy(proxy), headers=HEADERS) as r:
+        if r.status != 200:
+            raise DownloadError(f"播放列表 HTTP {r.status}")
+        master = await r.text()
+    variants = []
+    lines = master.splitlines()
+    i = 0
+    while i < len(lines):
+        line = lines[i].strip()
+        if line.startswith("#EXT-X-STREAM-INF"):
+            nxt = lines[i + 1].strip() if i + 1 < len(lines) else ""
+            bw = re.search(r"AVERAGE-BANDWIDTH=(\d+)", line)
+            variants.append((int(bw.group(1)) if bw else 0, nxt))
+            i += 2
+        else:
+            i += 1
+    if not variants:
+        variant_url = master_url if any(l for l in lines if l.strip() and not l.strip().startswith("#")) else None
+        if not variant_url:
+            raise DownloadError("无法解析播放列表")
+    else:
+        variant_url = max(variants, key=lambda v: v[0])[1]
+        if not variant_url.startswith("http"):
+            variant_url = urllib.parse.urljoin(master_url, variant_url)
+    base = variant_url.rsplit("/", 1)[0] + "/"
+    async with session.get(variant_url, proxy=req_proxy(proxy), headers=HEADERS) as r:
+        if r.status != 200:
+            raise DownloadError(f"视频流 HTTP {r.status}")
+        vplay = await r.text()
+    segs = []
+    for l in vplay.splitlines():
+        l = l.strip()
+        if l and not l.startswith("#"):
+            segs.append(l if l.startswith("http") else base + l.lstrip("/"))
+    if not segs:
+        raise DownloadError("视频流中没有分片")
+    return segs
+
+
+async def _stream_worker(url, proxy, hls, max_bytes, q):
+    sent = 0
+    try:
+        async with await make_session(proxy) as session:
+            if hls:
+                try:
+                    segs = await _hls_seg_urls(session, url, proxy)
+                except Exception:
+                    q.put(None)
+                    return
+                for su in segs:
+                    async with session.get(su, proxy=req_proxy(proxy), headers=HEADERS) as r:
+                        if r.status != 200:
+                            continue
+                        async for chunk in r.content.iter_chunked(64 * 1024):
+                            if max_bytes and sent + len(chunk) > max_bytes:
+                                q.put(None)
+                                return
+                            q.put(chunk)
+                            sent += len(chunk)
+            else:
+                async with session.get(url, proxy=req_proxy(proxy), headers=HEADERS,
+                                       allow_redirects=True) as r:
+                    if r.status != 200:
+                        q.put(None)
+                        return
+                    async for chunk in r.content.iter_chunked(64 * 1024):
+                        if max_bytes and sent + len(chunk) > max_bytes:
+                            q.put(None)
+                            return
+                        q.put(chunk)
+                        sent += len(chunk)
+    except Exception:
+        pass
+    finally:
+        q.put(None)
+
+
+def _run_stream_worker(url, proxy, hls, max_bytes, q):
+    asyncio.run(_stream_worker(url, proxy, hls, max_bytes, q))
+
+
+@app.route("/api/stream")
+def api_stream():
+    try:
+        url = base64.urlsafe_b64decode((request.args.get("u") or "").encode()).decode()
+    except Exception:
+        return "bad url", 400
+    if not url.startswith(("http://", "https://")):
+        return "bad url", 400
+    mtype = request.args.get("type", "")
+    ext = request.args.get("ext", "") or http_ext("", url, mtype)
+    title = _stream_filename(request.args.get("title", ""), ext)
+    cfg = get_config()
+    proxy = active_proxy(cfg)
+    max_bytes = int(cfg.get("max_mb", 200) or 200) * 1024 * 1024
+    hls = mtype == "video" and "video.bsky.app/watch" in url and ".m3u8" in url
+
+    q = queue.Queue(maxsize=16)
+    threading.Thread(target=_run_stream_worker, args=(url, proxy, hls, max_bytes, q), daemon=True).start()
+
+    def gen():
+        while True:
+            chunk = q.get()
+            if chunk is None:
+                break
+            yield chunk
+
+    if ext == ".ts":
+        ctype = "video/mp2t"
+    elif ext == ".mp4":
+        ctype = "video/mp4"
+    elif ext == ".webp":
+        ctype = "image/webp"
+    elif ext == ".gif":
+        ctype = "image/gif"
+    elif ext == ".png":
+        ctype = "image/png"
+    elif ext == ".jpg":
+        ctype = "image/jpeg"
+    else:
+        ctype = "application/octet-stream"
+    resp = Response(gen(), mimetype=ctype)
+    resp.headers["Content-Disposition"] = (
+        f"attachment; filename*=UTF-8''{urllib.parse.quote(title)}")
+    return resp
 
 
 @app.route("/media/<path:filename>")

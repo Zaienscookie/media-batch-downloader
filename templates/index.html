@@ -403,16 +403,34 @@ function clearResults() {
   $('progress-wrap').classList.remove('show');
 }
 
+function b64u(s) { return btoa(unescape(encodeURIComponent(s))); }
+
 async function download() {
   const sel = items.filter(i => selected.has(i.id));
   if (!sel.length) return;
+  if (sel.some(i => i.platform === 'youtube')) {
+    // YouTube 需服务器处理（yt-dlp），走旧任务流程
+    clearResults();
+    const r = await fetch('/api/download', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({items: sel})});
+    const d = await r.json();
+    if (!d.ok) { setStatus('❌ ' + d.error, 'err'); return; }
+    setStatus('⬇️ 开始批量下载...');
+    $('progress-wrap').classList.add('show');
+    poll(d.job_id);
+    return;
+  }
+  // 流式直传：服务器当透明中转，边下边发到你本机，不占服务器磁盘
   clearResults();
-  const r = await fetch('/api/download', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({items: sel})});
-  const d = await r.json();
-  if (!d.ok) { setStatus('❌ ' + d.error, 'err'); return; }
-  setStatus('⬇️ 开始批量下载...');
-  $('progress-wrap').classList.add('show');
-  poll(d.job_id);
+  $('progress-wrap').classList.remove('show');
+  setStatus(`⬇️ 正在把 ${sel.length} 个文件直传到你本机，请留意浏览器下载栏...`, 'ok');
+  sel.forEach((it, idx) => {
+    setTimeout(() => {
+      const query = 'u=' + b64u(it.source)
+        + '&type=' + encodeURIComponent(it.type || '')
+        + '&title=' + encodeURIComponent(it.title || 'media');
+      triggerDownload('/api/stream?' + query);
+    }, idx * 900);
+  });
 }
 
 function poll(jobId) {
@@ -429,9 +447,14 @@ function poll(jobId) {
       if (d.status !== 'running') {
         clearInterval(pollTimer);
         renderResults(d);
-        setStatus(d.errors && d.errors.length
-          ? `✅ 完成：成功 ${d.results.length} / 失败 ${d.errors.length}`
-          : `✅ 全部下载完成，共 ${d.results.length} 个文件`, 'ok');
+        if (d.results.length) {
+          setStatus(`✅ 完成：成功 ${d.results.length} 个 / 失败 ${d.errors.length} 个，正在打包 ZIP 发到本机...`, 'ok');
+          setTimeout(() => downloadZip(), 500);
+        } else if (d.errors.length) {
+          setStatus('❌ 全部失败：' + d.errors[0].error, 'err');
+        } else {
+          setStatus('❌ 没有下载到任何文件', 'err');
+        }
       }
     } catch (e) {
       clearInterval(pollTimer);
@@ -465,11 +488,20 @@ function renderResults(d) {
   window.dlFiles = d.results.map(r => r.file);
 }
 
+function triggerDownload(url) {
+  const a = document.createElement('a');
+  a.href = url;
+  a.style.display = 'none';
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(() => document.body.removeChild(a), 2000);
+}
+
 async function downloadZip() {
   if (!window.dlFiles || !window.dlFiles.length) return;
   const r = await fetch('/api/zip', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({files: window.dlFiles})});
   const d = await r.json();
-  if (d.ok) { window.location = d.download; }
+  if (d.ok) { triggerDownload(d.download); }
   else setStatus('❌ ' + d.error, 'err');
 }
 
