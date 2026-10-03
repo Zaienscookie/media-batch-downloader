@@ -97,6 +97,20 @@
 
   /* tabs */
   .tabs { display: flex; gap: 6px; margin-bottom: 14px; flex-wrap: wrap; }
+  .pager {
+    display: flex; gap: 8px; align-items: center; justify-content: center;
+    margin: 18px 0 6px; font-size: 13px; color: #8B94A7; flex-wrap: wrap;
+  }
+  .pager button {
+    background: #131A26; border: 1px solid #1F2937; color: #C7CEDB;
+    padding: 6px 14px; border-radius: 8px; cursor: pointer; font-size: 13px;
+  }
+  .pager button:hover:not(:disabled) { border-color: #3B82F6; color: #3B82F6; }
+  .pager button:disabled { opacity: .4; cursor: not-allowed; }
+  .pager input {
+    width: 58px; background: #0B0F17; border: 1px solid #1F2937; color: #E5E7EB;
+    border-radius: 6px; padding: 5px 8px; text-align: center; font-size: 13px;
+  }
   .tab {
     padding: 7px 16px; border-radius: 999px; font-size: 13px; font-weight: 600;
     cursor: pointer; border: 1px solid #1F2937; color: #8B94A7; background: transparent; transition: .15s;
@@ -203,7 +217,7 @@
     </div>
     <div class="set-hint">
       代理填本地代理软件的 HTTP/SOCKS 地址即可（如 clash 7890）。<br>
-      Twitter 用户首页依赖 Nitter 实例（自动逐个尝试上面的列表）；没有可用实例时可用 Docker 自建：<code>docker run -d -p 8080:8080 zedeus/nitter</code>。单条推文 / Bluesky / YouTube 不需要 Nitter。
+      Twitter 用户首页用"会话直连"（设置里填 auth_token / ct0，浏览器登录 x.com 后 F12→Application→Cookies 复制）；Bluesky / YouTube / 单条推文不需要。
     </div>
   </div>
 
@@ -214,14 +228,17 @@
       <span class="badge" id="p-badge">-</span>
       <span class="name" id="p-name">-</span>
       <span class="count" id="p-count"></span>
+      <span style="font-size:12px;color:#4ADE80" id="bw-hint"></span>
       <span class="spacer"></span>
       <button class="ghost" onclick="selAll()">全选</button>
+      <button class="ghost" onclick="selAllAll()">全选全部</button>
       <button class="ghost" onclick="selNone()">清空</button>
       <button id="btn-dl" class="success" onclick="download()">⬇️ 下载选中(0)</button>
     </div>
 
     <div class="tabs" id="tabs"></div>
     <div class="grid" id="grid"></div>
+    <div class="pager" id="pager"></div>
   </div>
 
   <div id="progress-wrap">
@@ -245,6 +262,8 @@
 let items = [];
 let selected = new Set();
 let filter = 'all';
+const PAGE_SIZE = 30;
+let page = 1;
 let cfgDirty = false;
 let pollTimer = null;
 
@@ -348,16 +367,20 @@ function render() {
     tabs.appendChild(t);
   });
 
-  // grid
+  // grid（分页）
   const grid = $('grid');
   grid.innerHTML = '';
   const shown = items.filter(i => filter === 'all' || i.type === filter);
-  if (!shown.length) { grid.innerHTML = '<div style="color:#5A657A;font-size:13px;grid-column:1/-1">该专区暂无资源</div>'; }
-  shown.forEach(i => {
+  const totalPages = Math.max(1, Math.ceil(shown.length / PAGE_SIZE));
+  if (page > totalPages) page = totalPages;
+  if (page < 1) page = 1;
+  const slice = shown.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
+  if (!slice.length) { grid.innerHTML = '<div style="color:#5A657A;font-size:13px;grid-column:1/-1">该专区暂无资源</div>'; }
+  slice.forEach(i => {
     const card = document.createElement('div');
     card.className = 'card' + (selected.has(i.id) ? ' selected' : '');
     const thumb = i.thumb
-      ? (i.type === 'video' ? `<video src="${esc(i.thumb)}" muted playsinline preload="metadata"></video>` : `<img src="${esc(i.thumb)}" loading="lazy" onerror="this.style.display='none'">`)
+      ? `<img src="${esc(i.thumb)}" onerror="this.style.display='none'">`
       : `<div class="empty">${i.type === 'video' ? '🎬' : (i.type === 'gif' ? '🎞️' : '🖼️')}</div>`;
     card.innerHTML = `
       <div class="thumb">
@@ -373,6 +396,39 @@ function render() {
     grid.appendChild(card);
   });
 
+  // 预取下一页/下两页缩略图，切页秒开
+  for (let p = page + 1; p <= Math.min(page + 2, totalPages); p++) {
+    const pre = shown.slice((p - 1) * PAGE_SIZE, p * PAGE_SIZE);
+    pre.forEach(it => { if (it.thumb) { const im = new Image(); im.src = it.thumb; } });
+  }
+
+  // 分页器
+  const pager = $('pager');
+  pager.innerHTML = '';
+  if (totalPages > 1) {
+    const prev = document.createElement('button');
+    prev.textContent = '‹ 上一页';
+    prev.disabled = page <= 1;
+    prev.onclick = () => { page--; render(); };
+    pager.appendChild(prev);
+    const info = document.createElement('span');
+    info.innerHTML = `第 <input id="page-jump" value="${page}" maxlength="4"> / ${totalPages} 页（共 ${shown.length} 项）`;
+    pager.appendChild(info);
+    const jump = document.createElement('button');
+    jump.textContent = '跳转';
+    jump.onclick = () => {
+      const v = parseInt(($('page-jump') || {value:'1'}).value, 10);
+      if (!isNaN(v)) { page = Math.min(Math.max(1, v), totalPages); render(); }
+    };
+    pager.appendChild(jump);
+    const next = document.createElement('button');
+    next.textContent = '下一页 ›';
+    next.disabled = page >= totalPages;
+    next.onclick = () => { page++; render(); };
+    pager.appendChild(next);
+    $('page-jump').addEventListener('keydown', e => { if (e.key === 'Enter') jump.onclick(); });
+  }
+
   // summary
   const btn = $('btn-dl');
   btn.textContent = `⬇️ 下载选中(${selected.size})`;
@@ -385,17 +441,59 @@ function url2name(u) {
   return m ? m[1] : '';
 }
 
+let bwTimer = null;
+function scheduleBw() {
+  if (bwTimer) clearTimeout(bwTimer);
+  bwTimer = setTimeout(updateBandwidth, 400);
+}
+
 function toggleSel(id) {
   if (selected.has(id)) selected.delete(id); else selected.add(id);
   render();
+  scheduleBw();
 }
 
 function selAll() {
   items.forEach(i => { if (filter === 'all' || i.type === filter) selected.add(i.id); });
   render();
+  scheduleBw();
 }
 
-function selNone() { selected.clear(); render(); }
+function selAllAll() {
+  items.forEach(i => selected.add(i.id));
+  page = 1;
+  render();
+  scheduleBw();
+}
+
+function selNone() { selected.clear(); render(); scheduleBw(); }
+
+const bwFmt = bytes => bytes >= 1048576
+  ? (bytes / 1048576).toFixed(1) + ' MB'
+  : Math.max(0, bytes >> 10) + ' KB';
+
+async function updateBandwidth() {
+  const sel = items.filter(i => selected.has(i.id));
+  const hint = $('bw-hint');
+  if (!sel.length) { hint.textContent = ''; return; }
+  const urls = [...new Set(sel.map(i => i.source))];
+  hint.textContent = '⏳ 估算中...';
+  try {
+    const r = await fetch('/api/sizes', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({urls})});
+    const d = await r.json();
+    if (!d.ok) { hint.textContent = ''; return; }
+    let total = 0, known = 0;
+    sel.forEach(it => {
+      const sz = d.sizes && d.sizes[it.source];
+      if (typeof sz === 'number' && sz > 0) { total += sz; known++; }
+    });
+    hint.textContent = known
+      ? `已选 ${sel.length} 项 · 流量 ≈ ${bwFmt(total)}${known < sel.length ? ` (+${sel.length - known} 项未知)` : ''}`
+      : `已选 ${sel.length} 项 · 流量未知`;
+  } catch (e) {
+    hint.textContent = '';
+  }
+}
 
 function clearResults() {
   $('results').innerHTML = '';

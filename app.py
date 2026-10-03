@@ -718,7 +718,7 @@ async def scan_twitter_graphql(session, handle, proxy, cfg, max_items):
         if len(items) >= max_items:
             break
         variables = dict(base_vars)
-        variables.update({"userId": rid, "count": 40, "cursor": cursor})
+        variables.update({"userId": rid, "count": 200, "cursor": cursor})
         d = await _tw_graphql(session, TW_Q_MEDIA, "UserMedia", variables, cfg, proxy)
         tl = ((((d.get("data") or {}).get("user") or {}).get("result") or {})
               .get("timeline") or {}).get("timeline") or {}
@@ -883,6 +883,59 @@ def api_config():
     for secret in ("twitter_bearer", "twitter_auth_token", "twitter_ct0"):
         out.pop(secret, None)
     return jsonify({"ok": True, "config": out})
+
+
+_SIZE_CACHE = {}
+_SIZE_LOCK = threading.Lock()
+
+
+async def _probe_sizes(urls, proxy):
+    result = {}
+    async with await make_session(proxy) as session:
+        for u in urls:
+            try:
+                if ".m3u8" in u:
+                    result[u] = None
+                    continue
+                got = None
+                async with session.head(u, proxy=req_proxy(proxy), headers=HEADERS,
+                                        allow_redirects=True,
+                                        timeout=aiohttp.ClientTimeout(total=20)) as r:
+                    if r.status == 200 and r.content_length:
+                        got = int(r.content_length)
+                if got is None:
+                    # 兜底：GET 只取响应头里的 Content-Length，不读正文
+                    async with session.get(u, proxy=req_proxy(proxy), headers=HEADERS,
+                                           allow_redirects=True,
+                                           timeout=aiohttp.ClientTimeout(total=20)) as r:
+                        if r.status == 200 and r.content_length:
+                            got = int(r.content_length)
+                result[u] = got
+            except Exception:
+                result[u] = None
+    return result
+
+
+@app.route("/api/sizes", methods=["POST"])
+def api_sizes():
+    data = request.get_json(silent=True) or {}
+    urls = [u.strip() for u in (data.get("urls") or []) if isinstance(u, str)]
+    urls = [u for u in urls if u.startswith(("http://", "https://"))]
+    if not urls:
+        return jsonify({"ok": True, "sizes": {}})
+    cfg = get_config()
+    proxy = active_proxy(cfg)
+    with _SIZE_LOCK:
+        miss = [u for u in urls if u not in _SIZE_CACHE]
+    if miss:
+        sizes = asyncio.run(_probe_sizes(miss, proxy))
+        with _SIZE_LOCK:
+            _SIZE_CACHE.update(sizes)
+            if len(_SIZE_CACHE) > 4000:
+                _SIZE_CACHE.clear()
+    with _SIZE_LOCK:
+        out = {u: _SIZE_CACHE.get(u) for u in urls}
+    return jsonify({"ok": True, "sizes": out})
 
 
 @app.route("/api/scan", methods=["POST"])
