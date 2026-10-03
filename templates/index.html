@@ -517,18 +517,27 @@ async function download() {
     poll(d.job_id);
     return;
   }
-  // 流式直传：服务器当透明中转，边下边发到你本机，不占服务器磁盘
+  // 流式打包 ZIP：服务器边抓取边打包成 zip 直接流到你本机，不占服务器磁盘
   clearResults();
   $('progress-wrap').classList.remove('show');
-  setStatus(`⬇️ 正在把 ${sel.length} 个文件直传到你本机，请留意浏览器下载栏...`, 'ok');
-  sel.forEach((it, idx) => {
-    setTimeout(() => {
-      const query = 'u=' + b64u(it.source)
-        + '&type=' + encodeURIComponent(it.type || '')
-        + '&title=' + encodeURIComponent(it.title || 'media');
-      triggerDownload('/api/stream?' + query);
-    }, idx * 900);
-  });
+  setStatus(`📦 正在打包 ${sel.length} 个文件为 ZIP 并发到本机...`, 'ok');
+  try {
+    const r = await fetch('/api/zipstream', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({items: sel})});
+    if (!r.ok) {
+      let err = '打包失败';
+      try { err = (await r.json()).error || err; } catch(e) {}
+      setStatus('❌ ' + err, 'err');
+      return;
+    }
+    const blob = await r.blob();
+    const url = URL.createObjectURL(blob);
+    const day = new Date().toISOString().slice(0, 10);
+    triggerDownload(url, `media_${day}.zip`);
+    setTimeout(() => URL.revokeObjectURL(url), 60000);
+    setStatus(`✅ 已打包 ${sel.length} 个文件为 ZIP（${bwFmt(blob.size)}），见下载栏`, 'ok');
+  } catch (e) {
+    setStatus('❌ 打包失败: ' + e, 'err');
+  }
 }
 
 function poll(jobId) {
@@ -586,9 +595,10 @@ function renderResults(d) {
   window.dlFiles = d.results.map(r => r.file);
 }
 
-function triggerDownload(url) {
+function triggerDownload(url, name) {
   const a = document.createElement('a');
   a.href = url;
+  if (name) a.download = name;
   a.style.display = 'none';
   document.body.appendChild(a);
   a.click();

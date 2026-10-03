@@ -24,6 +24,7 @@ import urllib.parse
 from concurrent.futures import ThreadPoolExecutor
 
 import aiohttp
+import zipstream
 from flask import Flask, request, jsonify, send_file, render_template, Response
 from bs4 import BeautifulSoup
 
@@ -181,9 +182,11 @@ def http_ext(content_type, url, type_hint=""):
         return ".gif"
     if type_hint == "video":
         return ".mp4"
-    m = re.search(r"\.(jpe?g|png|gif|webp|mp4|webm|mov|mkv)(?:$|[?#])", url, re.I)
+    m = re.search(r"(?:\.|@)(jpe?g|png|gif|webp|mp4|webm|mov|mkv)(?:$|[?#])", url, re.I)
     if m:
         return "." + m.group(1).lower()
+    if type_hint in ("image", "photo"):
+        return ".jpg"
     return ".bin"
 
 
@@ -392,6 +395,11 @@ def extract_bsky_media(post, handle):
         for img in embed.get("images") or []:
             full = img.get("fullsize") or ""
             thumb = img.get("thumb") or full
+            # fullsize 可能没带 @ext，用同 blob 的 thumb 后缀补上（保证下载文件名扩展名正确）
+            if full and not re.search(r"\.(jpe?g|png|gif|webp)(?:$|[?#])", full, re.I):
+                em = re.search(r"@(jpe?g|png|gif|webp)(?:$|[?#])", thumb, re.I)
+                if em:
+                    full = full + "@" + em.group(1).lower()
             ar = img.get("aspectRatio") or {}
             if full:
                 out.append(mk_item("bluesky", "image", text or "图片",
@@ -1194,6 +1202,45 @@ def api_stream():
     resp = Response(gen(), mimetype=ctype)
     resp.headers["Content-Disposition"] = (
         f"attachment; filename*=UTF-8''{urllib.parse.quote(title)}")
+    return resp
+
+
+def _source_chunks(url, proxy, hls, max_bytes):
+    q = queue.Queue(maxsize=16)
+    threading.Thread(target=_run_stream_worker, args=(url, proxy, hls, max_bytes, q), daemon=True).start()
+    while True:
+        chunk = q.get()
+        if chunk is None:
+            return
+        yield chunk
+
+
+@app.route("/api/zipstream", methods=["POST"])
+def api_zipstream():
+    data = request.get_json(silent=True) or {}
+    items = [it for it in (data.get("items") or [])
+             if (it.get("source") or "").startswith(("http://", "https://"))]
+    if not items:
+        return jsonify({"ok": False, "error": "没有可打包的资源"})
+    cfg = get_config()
+    proxy = active_proxy(cfg)
+    max_bytes = int(cfg.get("max_mb", 200) or 200) * 1024 * 1024
+    try:
+        zs = zipstream.ZipStream(compress_type=zipstream.ZIP_DEFLATED)
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"zipstream 不可用: {e}"})
+    for it in items:
+        url = it.get("source")
+        mtype = it.get("type") or ""
+        ext = http_ext("", url, mtype)
+        name = _stream_filename(it.get("title") or "media", ext)
+        hls = mtype == "video" and "video.bsky.app/watch" in url and ".m3u8" in url
+        try:
+            zs.add(_source_chunks(url, proxy, hls, max_bytes), name)
+        except Exception:
+            continue
+    resp = Response(zs, mimetype="application/zip")
+    resp.headers["Content-Disposition"] = "attachment; filename=batch.zip"
     return resp
 
 

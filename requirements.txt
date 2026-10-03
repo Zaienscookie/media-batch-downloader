@@ -2,3 +2,4 @@ flask>=3.0
 aiohttp>=3.9
 beautifulsoup4>=4.12
 aiohttp-socks>=0.9
+zipstream-ng>=1.7
