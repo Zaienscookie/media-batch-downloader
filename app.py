@@ -726,7 +726,7 @@ async def scan_twitter_graphql(session, handle, proxy, cfg, max_items):
         if len(items) >= max_items:
             break
         variables = dict(base_vars)
-        variables.update({"userId": rid, "count": 200, "cursor": cursor})
+        variables.update({"userId": rid, "count": 40, "cursor": cursor})
         d = await _tw_graphql(session, TW_Q_MEDIA, "UserMedia", variables, cfg, proxy)
         tl = ((((d.get("data") or {}).get("user") or {}).get("result") or {})
               .get("timeline") or {}).get("timeline") or {}
