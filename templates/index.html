@@ -554,34 +554,60 @@ async function download() {
     poll(d.job_id);
     return;
   }
-  // 流式打包 ZIP：服务器边抓取边打包成 zip 直接流到你本机，不占服务器磁盘
+  // 流式打包 ZIP：浏览器直接流式存到磁盘（表单提交，不占内存），服务器不落盘
   clearResults();
   $('progress-wrap').classList.remove('show');
   setStatus(`📦 正在打包 ${sel.length} 个文件为 ZIP 并发到本机...`, 'ok');
-  try {
-    const r = await fetch('/api/zipstream', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({items: sel})});
-    if (!r.ok) {
-      let err = '打包失败';
-      try { err = (await r.json()).error || err; } catch(e) {}
-      setStatus('❌ ' + err, 'err');
-      return;
-    }
-    const blob = await r.blob();
-    const url = URL.createObjectURL(blob);
-    const day = new Date().toISOString().slice(0, 10);
-    triggerDownload(url, `media_${day}.zip`);
-    setTimeout(() => URL.revokeObjectURL(url), 60000);
-    setStatus(`✅ 已打包 ${sel.length} 个文件为 ZIP（${bwFmt(blob.size)}），见下载栏`, 'ok');
-  } catch (e) {
-    setStatus('❌ 打包失败: ' + e, 'err');
-  }
+  postZip(sel);
 }
 
 function downloadAll() {
   if (!items.length) { setStatus('请先扫描', 'err'); return; }
-  items.forEach(i => selected.add(i.id));
-  render();
-  download();
+  autoLoadAll(() => {
+    items.forEach(i => selected.add(i.id));
+    render();
+    download();
+  });
+}
+
+async function autoLoadAll(done) {
+  let guard = 0, stall = 0;
+  setStatus('<span class="spinner"></span>全量加载中...');
+  while (canMore && moreUrl && guard < 2000) {
+    guard++;
+    try {
+      const r = await fetch('/api/scan_more', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({url: moreUrl})});
+      const d = await r.json();
+      if (!d.ok) break;
+      const seen = new Set(items.map(i => i.source));
+      let added = 0;
+      (d.items || []).forEach(it => { if (!seen.has(it.source)) { items.push(it); seen.add(it.source); added++; } });
+      canMore = !!d.can_more;
+      render();
+      setStatus(`<span class="spinner"></span>全量加载中... 已 ${items.length} 项`);
+      if (added === 0) { stall++; if (stall >= 3) break; } else stall = 0;
+    } catch (e) { break; }
+  }
+  setStatus(`✅ 全量加载完成，共 ${items.length} 项`, 'ok');
+  done();
+}
+
+function postZip(sel) {
+  let frame = document.getElementById('dl_frame');
+  if (!frame) {
+    frame = document.createElement('iframe');
+    frame.id = 'dl_frame'; frame.name = 'dl_frame'; frame.style.display = 'none';
+    document.body.appendChild(frame);
+  }
+  const form = document.createElement('form');
+  form.method = 'POST'; form.action = '/api/zipstream'; form.target = 'dl_frame';
+  form.style.display = 'none';
+  const inp = document.createElement('input');
+  inp.type = 'hidden'; inp.name = 'payload'; inp.value = JSON.stringify({items: sel});
+  form.appendChild(inp);
+  document.body.appendChild(form);
+  form.submit();
+  setTimeout(() => document.body.removeChild(form), 10000);
 }
 
 function poll(jobId) {

@@ -1326,6 +1326,11 @@ def _source_chunks(url, proxy, hls, max_bytes):
 @app.route("/api/zipstream", methods=["POST"])
 def api_zipstream():
     data = request.get_json(silent=True) or {}
+    if not data and request.form.get("payload"):
+        try:
+            data = json.loads(request.form["payload"])
+        except Exception:
+            data = {}
     items = [it for it in (data.get("items") or [])
              if (it.get("source") or "").startswith(("http://", "https://"))]
     if not items:
