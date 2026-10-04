@@ -1337,6 +1337,7 @@ def api_zipstream():
              if (it.get("source") or "").startswith(("http://", "https://"))]
     if not items:
         return jsonify({"ok": False, "error": "没有可打包的资源"})
+    zipname = _stream_filename(data.get("name") or "media", ".zip")
     cfg = get_config()
     proxy = active_proxy(cfg)
     max_bytes = int(cfg.get("max_mb", 200) or 200) * 1024 * 1024
@@ -1348,14 +1349,16 @@ def api_zipstream():
         url = it.get("source")
         mtype = it.get("type") or ""
         ext = http_ext("", url, mtype)
-        name = _stream_filename(it.get("title") or "media", ext)
+        arc = _stream_filename(it.get("title") or "media", ext)
+        sub = "videos" if mtype == "video" else "images"
         hls = mtype == "video" and "video.bsky.app/watch" in url and ".m3u8" in url
         try:
-            zs.add(_source_chunks(url, proxy, hls, max_bytes), name)
+            zs.add(_source_chunks(url, proxy, hls, max_bytes), f"{sub}/{arc}")
         except Exception:
             continue
     resp = Response(zs, mimetype="application/zip")
-    resp.headers["Content-Disposition"] = "attachment; filename=batch.zip"
+    resp.headers["Content-Disposition"] = (
+        f"attachment; filename*=UTF-8''{urllib.parse.quote(zipname)}")
     return resp
 
 

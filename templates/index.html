@@ -175,6 +175,26 @@
 
   .tips { margin-top: 28px; font-size: 12px; color: #5A657A; line-height: 1.9; border-top: 1px solid #1F2937; padding-top: 16px; }
   .tips b { color: #8B94A7; }
+  .pager .more-btn { border-color: #22C55E; color: #4ADE80; font-weight: 600; }
+
+  /* 手机端：一行多图、缩小尺寸 */
+  @media (max-width: 640px) {
+    body { padding: 18px 8px 60px; }
+    h1 { font-size: 21px; }
+    .summary { gap: 8px; padding: 10px 12px; }
+    .summary button { padding: 8px 12px; font-size: 13px; }
+    .grid { grid-template-columns: repeat(auto-fill, minmax(104px, 1fr)); gap: 8px; }
+    .thumb { aspect-ratio: 1/1; }
+    .meta { padding: 6px 7px 8px; }
+    .meta .title { font-size: 11px; -webkit-line-clamp: 2; min-height: 30px; }
+    .meta .date { font-size: 10px; }
+    .type-badge { font-size: 10px; padding: 1px 6px; }
+    .check { width: 20px; height: 20px; top: 5px; left: 5px; }
+    .tab { padding: 6px 12px; font-size: 12px; }
+    .pager { gap: 6px; font-size: 12px; }
+    .pager button { padding: 5px 10px; font-size: 12px; }
+    .pager .pjump { width: 46px; }
+  }
 </style>
 </head>
 <body>
@@ -233,11 +253,17 @@
       <button class="ghost" onclick="selAll()">全选</button>
       <button class="ghost" onclick="selAllAll()">全选全部</button>
       <button class="ghost" onclick="selNone()">清空</button>
+    </div>
+    <div class="summary">
+      <button class="ghost" id="btn-loadall" onclick="loadAllOnly()">🔁 全量加载</button>
       <button class="warn" onclick="downloadAll()">📦 全量下载</button>
+      <button class="ghost" id="btn-stop" onclick="stopLoad()" style="display:none;border-color:#F87171;color:#F87171">⏹ 停止</button>
+      <span class="spacer"></span>
       <button id="btn-dl" class="success" onclick="download()">⬇️ 下载选中(0)</button>
     </div>
 
     <div class="tabs" id="tabs"></div>
+    <div class="pager" id="pager-top"></div>
     <div class="grid" id="grid"></div>
     <div class="pager" id="pager"></div>
   </div>
@@ -428,49 +454,54 @@ function render() {
     pre.forEach(it => { if (it.thumb) { const im = new Image(); im.src = it.thumb; } });
   }
 
-  // 分页器
-  const pager = $('pager');
-  pager.innerHTML = '';
-  if (totalPages > 1) {
-    const prev = document.createElement('button');
-    prev.textContent = '‹ 上一页';
-    prev.disabled = page <= 1;
-    prev.onclick = () => { page--; render(); };
-    pager.appendChild(prev);
-    const info = document.createElement('span');
-    info.innerHTML = `第 <input id="page-jump" value="${page}" maxlength="4"> / ${totalPages} 页（共 ${shown.length} 项）`;
-    pager.appendChild(info);
-    const jump = document.createElement('button');
-    jump.textContent = '跳转';
-    jump.onclick = () => {
-      const v = parseInt(($('page-jump') || {value:'1'}).value, 10);
-      if (!isNaN(v)) { page = Math.min(Math.max(1, v), totalPages); render(); }
-    };
-    pager.appendChild(jump);
-    const next = document.createElement('button');
-    next.textContent = '下一页 ›';
-    next.disabled = page >= totalPages;
-    next.onclick = () => { page++; render(); };
-    pager.appendChild(next);
-    $('page-jump').addEventListener('keydown', e => { if (e.key === 'Enter') jump.onclick(); });
-  }
-
-  // 加载更多（继续往后抓该博主的历史内容）
-  const more = document.createElement('button');
-  more.id = 'btn-more';
-  more.textContent = canMore ? '➕ 加载更多' : '已到底';
-  more.disabled = !canMore;
-  more.onclick = loadMore;
-  more.style.marginLeft = '8px';
-  more.style.borderColor = canMore ? '#22C55E' : '#1F2937';
-  more.style.color = canMore ? '#4ADE80' : '#5A657A';
-  pager.appendChild(more);
+  // 分页器（顶部 + 底部各一个）
+  renderPager($('pager-top'), shown, totalPages);
+  renderPager($('pager'), shown, totalPages);
 
   // summary
   const btn = $('btn-dl');
   btn.textContent = `⬇️ 下载选中(${selected.size})`;
   btn.disabled = selected.size === 0;
   $('panel').classList.add('show');
+}
+
+function renderPager(el, shown, totalPages) {
+  el.innerHTML = '';
+  if (totalPages > 1) {
+    const prev = document.createElement('button');
+    prev.textContent = '‹ 上一页';
+    prev.disabled = page <= 1;
+    prev.onclick = () => { page--; render(); };
+    el.appendChild(prev);
+
+    const info = document.createElement('span');
+    info.innerHTML = `第 <input class="pjump" value="${page}" maxlength="4"> / ${totalPages} 页`;
+    el.appendChild(info);
+
+    const jump = document.createElement('button');
+    jump.textContent = '跳转';
+    const doJump = () => {
+      const inp = el.querySelector('.pjump');
+      const v = parseInt(inp && inp.value, 10);
+      if (!isNaN(v)) { page = Math.min(Math.max(1, v), totalPages); render(); }
+    };
+    jump.onclick = doJump;
+    el.appendChild(jump);
+    const inp0 = el.querySelector('.pjump');
+    if (inp0) inp0.addEventListener('keydown', e => { if (e.key === 'Enter') doJump(); });
+
+    const next = document.createElement('button');
+    next.textContent = '下一页 ›';
+    next.disabled = page >= totalPages;
+    next.onclick = () => { page++; render(); };
+    el.appendChild(next);
+  }
+  const more = document.createElement('button');
+  more.className = 'more-btn';
+  more.textContent = canMore ? '➕ 加载更多' : '已到底';
+  more.disabled = !canMore;
+  more.onclick = loadMore;
+  el.appendChild(more);
 }
 
 function url2name(u) {
@@ -561,6 +592,13 @@ async function download() {
   postZip(sel);
 }
 
+let stopFlag = false;
+function showStop(v) {
+  const b = document.getElementById('btn-stop');
+  if (b) b.style.display = v ? 'inline-block' : 'none';
+}
+function stopLoad() { stopFlag = true; setStatus('⏹ 正在停止...', 'err'); }
+
 function downloadAll() {
   if (!items.length) { setStatus('请先扫描', 'err'); return; }
   autoLoadAll(() => {
@@ -570,11 +608,19 @@ function downloadAll() {
   });
 }
 
+function loadAllOnly() {
+  if (!items.length) { setStatus('请先扫描', 'err'); return; }
+  autoLoadAll(() => {});
+}
+
 async function autoLoadAll(done) {
   const sleep = ms => new Promise(r => setTimeout(r, ms));
+  stopFlag = false;
+  showStop(true);
   let guard = 0, incomplete = false, lastErr = '';
-  setStatus('<span class="spinner"></span>全量加载中...');
-  while (canMore && moreUrl && guard < 5000) {
+  setStatus('<span class="spinner"></span>全量加载中...（可点「⏹ 停止」中断）');
+  while (canMore && moreUrl && guard < 100000) {
+    if (stopFlag) { incomplete = true; lastErr = '已手动停止'; break; }
     guard++;
     let d;
     try {
@@ -586,14 +632,16 @@ async function autoLoadAll(done) {
     (d.items || []).forEach(it => { if (!seen.has(it.source)) { items.push(it); seen.add(it.source); } });
     canMore = !!d.can_more;
     render();
-    setStatus(`<span class="spinner"></span>全量加载中... 已 ${items.length} 项（可随时停止）`);
-    await sleep(600);                 // 轻柔节流，减少触发限流
+    setStatus(`<span class="spinner"></span>全量加载中... 已 ${items.length} 项`);
+    await sleep(400);
   }
+  showStop(false);
+  stopFlag = false;
   if (incomplete) {
-    setStatus(`⚠️ 已加载 ${items.length} 项，但未到全部${lastErr ? '（' + lastErr + '）' : ''}。进度已保存——等几分钟后再点一次「📦 全量下载」会从断点继续。`, 'err');
-    return;                            // 不自动下载，避免拿到残缺包
+    setStatus(`⏹ 已停止/中断，共 ${items.length} 项${lastErr ? '（' + lastErr + '）' : ''}。可再点「🔁 全量加载」或「📦 全量下载」继续。`, 'err');
+    return;
   }
-  setStatus(`✅ 全量加载完成，共 ${items.length} 项，开始打包下载...`, 'ok');
+  setStatus(`✅ 全量加载完成，共 ${items.length} 项`, 'ok');
   done();
 }
 
@@ -604,11 +652,13 @@ function postZip(sel) {
     frame.id = 'dl_frame'; frame.name = 'dl_frame'; frame.style.display = 'none';
     document.body.appendChild(frame);
   }
+  const uname = (items[0] && items[0].page) ? (url2name(items[0].page) || 'media') : 'media';
   const form = document.createElement('form');
   form.method = 'POST'; form.action = '/api/zipstream'; form.target = 'dl_frame';
   form.style.display = 'none';
   const inp = document.createElement('input');
-  inp.type = 'hidden'; inp.name = 'payload'; inp.value = JSON.stringify({items: sel});
+  inp.type = 'hidden'; inp.name = 'payload';
+  inp.value = JSON.stringify({items: sel, name: uname});
   form.appendChild(inp);
   document.body.appendChild(form);
   form.submit();
