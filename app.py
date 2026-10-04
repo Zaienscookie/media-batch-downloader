@@ -589,7 +589,39 @@ TW_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
 TW_BEARER = ("AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs"
              "%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA")
 TW_Q_SCREEN = "Gb-d6r0vxPOADdG62OEBpQ"      # UserByScreenName
-TW_Q_MEDIA = "VyudDWQnr9vJNw7GasFz2g"        # UserMedia
+TW_Q_MEDIA = "VyudDWQnr9vJNw7GasFz2g"        # UserMedia（媒体页，窗口受限）
+TW_Q_TWEETS = "SXVCYB8XHSS25nzIljNtZA"       # UserTweets（完整推文时间线，可深度分页）
+
+# UserTweets 用的 features（取自 twscrape，实测可用）
+TW_FEATURES_TWEETS = {
+    "articles_preview_enabled": True, "c9s_tweet_anatomy_moderator_badge_enabled": True,
+    "communities_web_enable_tweet_community_results_fetch": True,
+    "creator_subscriptions_quote_tweet_preview_enabled": False,
+    "creator_subscriptions_tweet_preview_api_enabled": True,
+    "freedom_of_speech_not_reach_fetch_enabled": True,
+    "graphql_is_translatable_rweb_tweet_is_translatable_enabled": True,
+    "longform_notetweets_consumption_enabled": True,
+    "longform_notetweets_inline_media_enabled": True,
+    "longform_notetweets_rich_text_read_enabled": True,
+    "responsive_web_edit_tweet_api_enabled": True,
+    "responsive_web_enhance_cards_enabled": False,
+    "responsive_web_graphql_exclude_directive_enabled": True,
+    "responsive_web_graphql_skip_user_profile_image_extensions_enabled": False,
+    "responsive_web_grok_community_note_auto_translation_is_enabled": False,
+    "responsive_web_graphql_timeline_navigation_enabled": True,
+    "responsive_web_profile_redirect_enabled": True,
+    "responsive_web_twitter_article_tweet_consumption_enabled": True,
+    "rweb_tipjar_consumption_enabled": True, "rweb_video_timestamps_enabled": True,
+    "standardized_nudges_misinfo": True, "tweet_awards_web_tipping_enabled": False,
+    "tweet_with_visibility_results_prefer_gql_limited_actions_policy_enabled": True,
+    "tweetypie_unmention_optimization_enabled": True, "verified_phone_label_enabled": False,
+    "view_counts_everywhere_api_enabled": True,
+    "responsive_web_grok_analyze_button_fetch_trends_enabled": False,
+    "premium_content_api_read_enabled": False,
+    "profile_label_improvements_pcf_label_in_post_enabled": False,
+    "responsive_web_jetfuel_frame": False, "rweb_video_screen_enabled": True,
+    "responsive_web_grok_show_grok_translated_post": True,
+}
 
 TW_FEATURES = {
     "rweb_video_screen_enabled": False, "rweb_cashtags_enabled": True,
@@ -647,10 +679,10 @@ def _tw_headers(cfg):
     }
 
 
-async def _tw_graphql(session, qid, operation, variables, cfg, proxy):
+async def _tw_graphql(session, qid, operation, variables, cfg, proxy, features=None):
     params = {
         "variables": json.dumps(variables),
-        "features": json.dumps(TW_FEATURES),
+        "features": json.dumps(features or TW_FEATURES),
         "fieldToggles": json.dumps(TW_TOGGLES),
     }
     url = f"{TW_GQL}/{qid}/{operation}?" + urllib.parse.urlencode(params)
@@ -713,8 +745,8 @@ TW_MEDIA_BASE_VARS = {
 }
 
 
-def _tw_media_page(d, handle):
-    """解析 UserMedia 一页，返回 (items, next_cursor)"""
+def _tw_tweets_page(d, handle):
+    """解析 UserTweets 一页，返回 (items, next_cursor)"""
     tl = ((((d.get("data") or {}).get("user") or {}).get("result") or {})
           .get("timeline") or {}).get("timeline") or {}
     instructions = tl.get("instructions") or []
@@ -723,18 +755,15 @@ def _tw_media_page(d, handle):
     for ins in instructions:
         for e in ins.get("entries", []):
             c = e.get("content") or {}
-            ctype = c.get("__typename")
-            if ctype == "TimelineTimelineCursor":
+            ct = c.get("__typename")
+            if ct == "TimelineTimelineCursor":
                 if c.get("cursorType") in ("Bottom", "ShowMore", "Top"):
                     cursor = c.get("value")
-            elif ctype == "TimelineTimelineModule":
-                for it in c.get("items", []):
-                    ic = (it.get("item") or {}).get("itemContent") or {}
+            else:
+                ic = c.get("itemContent")
+                if ic:
                     tr = (ic.get("tweet_results") or {}).get("result") or {}
                     items.extend(_extract_tw_media(tr, handle))
-            elif ctype == "TimelineTweet":
-                tr = (c.get("tweet_results") or {}).get("result") or {}
-                items.extend(_extract_tw_media(tr, handle))
     return items, cursor
 
 
@@ -752,22 +781,23 @@ async def scan_twitter_graphql(session, handle, proxy, cfg, max_items):
     if not rid:
         raise ScanError(f"无法获取 @{handle} 的 ID")
 
+    # 枚举该用户的完整推文时间线（可深度分页），逐条抽出带媒体的推文
     items = []
     cursor = None
-    for _ in range(10):
+    for _ in range(20):
         if len(items) >= max_items:
             break
-        variables = dict(TW_MEDIA_BASE_VARS)
-        variables.update({"userId": rid, "count": 40, "cursor": cursor})
-        d = await _tw_graphql(session, TW_Q_MEDIA, "UserMedia", variables, cfg, proxy)
-        page_items, cursor = _tw_media_page(d, handle)
+        variables = {"userId": rid, "count": 40, "includePromotedContent": True,
+                     "withQuickPromoteEligibilityTweetFields": True, "withVoice": True,
+                     "withV2Timeline": True, "cursor": cursor}
+        d = await _tw_graphql(session, TW_Q_TWEETS, "UserTweets", variables, cfg, proxy,
+                              features=TW_FEATURES_TWEETS)
+        page_items, cursor = _tw_tweets_page(d, handle)
         items.extend(page_items)
-        if not page_items and items:
-            break
         if not cursor:
             break
     if not items:
-        raise ScanError(f"@{handle} 没有可下载的媒体（或接口返回受限）")
+        raise ScanError(f"@{handle} 前若干页未找到媒体（可能以文字为主，或接口受限）")
     _MORE_STATE[handle.lower()] = {"platform": "twitter", "rid": rid, "cursor": cursor, "handle": handle}
     return items[:max_items]
 
@@ -1018,10 +1048,12 @@ async def _scan_more_async(url):
             st["cursor"] = d.get("cursor")
             return items
         if st["platform"] == "twitter":
-            variables = dict(TW_MEDIA_BASE_VARS)
-            variables.update({"userId": st["rid"], "count": 40, "cursor": st["cursor"]})
-            d = await _tw_graphql(session, TW_Q_MEDIA, "UserMedia", variables, cfg, proxy)
-            items, cursor = _tw_media_page(d, st.get("handle") or key)
+            variables = {"userId": st["rid"], "count": 40, "includePromotedContent": True,
+                         "withQuickPromoteEligibilityTweetFields": True, "withVoice": True,
+                         "withV2Timeline": True, "cursor": st["cursor"]}
+            d = await _tw_graphql(session, TW_Q_TWEETS, "UserTweets", variables, cfg, proxy,
+                                  features=TW_FEATURES_TWEETS)
+            items, cursor = _tw_tweets_page(d, st.get("handle") or key)
             st["cursor"] = cursor
             return items
     return []

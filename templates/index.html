@@ -233,6 +233,7 @@
       <button class="ghost" onclick="selAll()">全选</button>
       <button class="ghost" onclick="selAllAll()">全选全部</button>
       <button class="ghost" onclick="selNone()">清空</button>
+      <button class="warn" onclick="downloadAll()">📦 全量下载</button>
       <button id="btn-dl" class="success" onclick="download()">⬇️ 下载选中(0)</button>
     </div>
 
@@ -574,6 +575,13 @@ async function download() {
   } catch (e) {
     setStatus('❌ 打包失败: ' + e, 'err');
   }
+}
+
+function downloadAll() {
+  if (!items.length) { setStatus('请先扫描', 'err'); return; }
+  items.forEach(i => selected.add(i.id));
+  render();
+  download();
 }
 
 function poll(jobId) {
