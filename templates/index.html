@@ -264,6 +264,8 @@ let selected = new Set();
 let filter = 'all';
 const PAGE_SIZE = 30;
 let page = 1;
+let moreUrl = '';
+let canMore = false;
 let cfgDirty = false;
 let pollTimer = null;
 
@@ -334,12 +336,35 @@ async function scan() {
     const d = await r.json();
     if (!d.ok) { setStatus('❌ ' + d.error, 'err'); return; }
     items = d.items;
+    moreUrl = url;
+    canMore = !!d.can_more;
     render();
-    setStatus('✅ 扫描到 ' + items.length + ' 个媒体资源');
+    setStatus('✅ 扫描到 ' + items.length + ' 个媒体资源' + (canMore ? '（可点「加载更多」继续翻页）' : ''));
   } catch (e) {
     setStatus('❌ 请求失败: ' + e, 'err');
   } finally {
     btn.disabled = false;
+  }
+}
+
+async function loadMore() {
+  if (!moreUrl || !canMore) return;
+  const btn = $('btn-more');
+  if (btn) { btn.disabled = true; btn.textContent = '加载中...'; }
+  setStatus('<span class="spinner"></span>正在加载更多...');
+  try {
+    const r = await fetch('/api/scan_more', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({url: moreUrl})});
+    const d = await r.json();
+    if (!d.ok) { setStatus('❌ ' + d.error, 'err'); return; }
+    const before = items.length;
+    const seen = new Set(items.map(i => i.source));
+    (d.items || []).forEach(it => { if (!seen.has(it.source)) { items.push(it); seen.add(it.source); } });
+    canMore = !!d.can_more;
+    render();
+    const added = items.length - before;
+    setStatus(added ? `✅ 又加载了 ${added} 个（共 ${items.length}）` : (canMore ? '本页没有新媒体' : '已到底'));
+  } catch (e) {
+    setStatus('❌ 加载失败: ' + e, 'err');
   }
 }
 
@@ -428,6 +453,17 @@ function render() {
     pager.appendChild(next);
     $('page-jump').addEventListener('keydown', e => { if (e.key === 'Enter') jump.onclick(); });
   }
+
+  // 加载更多（继续往后抓该博主的历史内容）
+  const more = document.createElement('button');
+  more.id = 'btn-more';
+  more.textContent = canMore ? '➕ 加载更多' : '已到底';
+  more.disabled = !canMore;
+  more.onclick = loadMore;
+  more.style.marginLeft = '8px';
+  more.style.borderColor = canMore ? '#22C55E' : '#1F2937';
+  more.style.color = canMore ? '#4ADE80' : '#5A657A';
+  pager.appendChild(more);
 
   // summary
   const btn = $('btn-dl');

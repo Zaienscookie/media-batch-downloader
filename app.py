@@ -87,6 +87,10 @@ class NitterUnusable(ScanError):
     pass
 
 
+# 记录每个账号最近一次扫描的游标，供「加载更多」继续翻页
+_MORE_STATE = {}
+
+
 class DownloadError(Exception):
     pass
 
@@ -375,6 +379,7 @@ async def scan_bluesky(session, handle, proxy, max_items):
         pages += 1
     if not items:
         raise ScanError("该用户没有可下载的媒体，或用户名无效")
+    _MORE_STATE[handle.lower()] = {"platform": "bluesky", "actor": handle, "cursor": cursor}
     return items
 
 
@@ -696,6 +701,43 @@ def _extract_tw_media(tr, handle):
     return out
 
 
+TW_MEDIA_BASE_VARS = {
+    "includePromotedContent": False, "withQuickPromoteEligibilityTweetFields": True,
+    "withSuperFollowsUserFields": True, "withSuperFollowsTweetFields": True,
+    "withUserResults": True, "withNewUserResults": True, "withBirdwatchPivots": False,
+    "withBirdwatchNotes": True, "withReactionsMetadata": False,
+    "withReactionsPerspective": False, "withVoice": True, "withV": True,
+    "countWithTweetCount": True, "withTweetResultCount": True,
+    "withSafetyModeUserFields": True, "withHighlightedLabel": True,
+    "withTweetQuoteCount": True, "includeReplyCount": True,
+}
+
+
+def _tw_media_page(d, handle):
+    """解析 UserMedia 一页，返回 (items, next_cursor)"""
+    tl = ((((d.get("data") or {}).get("user") or {}).get("result") or {})
+          .get("timeline") or {}).get("timeline") or {}
+    instructions = tl.get("instructions") or []
+    cursor = None
+    items = []
+    for ins in instructions:
+        for e in ins.get("entries", []):
+            c = e.get("content") or {}
+            ctype = c.get("__typename")
+            if ctype == "TimelineTimelineCursor":
+                if c.get("cursorType") in ("Bottom", "ShowMore", "Top"):
+                    cursor = c.get("value")
+            elif ctype == "TimelineTimelineModule":
+                for it in c.get("items", []):
+                    ic = (it.get("item") or {}).get("itemContent") or {}
+                    tr = (ic.get("tweet_results") or {}).get("result") or {}
+                    items.extend(_extract_tw_media(tr, handle))
+            elif ctype == "TimelineTweet":
+                tr = (c.get("tweet_results") or {}).get("result") or {}
+                items.extend(_extract_tw_media(tr, handle))
+    return items, cursor
+
+
 async def scan_twitter_graphql(session, handle, proxy, cfg, max_items):
     d = await _tw_graphql(session, TW_Q_SCREEN, "UserByScreenName",
                           {"screen_name": handle, "withGrokTranslatedBio": False}, cfg, proxy)
@@ -710,57 +752,23 @@ async def scan_twitter_graphql(session, handle, proxy, cfg, max_items):
     if not rid:
         raise ScanError(f"无法获取 @{handle} 的 ID")
 
-    base_vars = {
-        "includePromotedContent": False, "withQuickPromoteEligibilityTweetFields": True,
-        "withSuperFollowsUserFields": True, "withSuperFollowsTweetFields": True,
-        "withUserResults": True, "withNewUserResults": True, "withBirdwatchPivots": False,
-        "withBirdwatchNotes": True, "withReactionsMetadata": False,
-        "withReactionsPerspective": False, "withVoice": True, "withV": True,
-        "countWithTweetCount": True, "withTweetResultCount": True,
-        "withSafetyModeUserFields": True, "withHighlightedLabel": True,
-        "withTweetQuoteCount": True, "includeReplyCount": True,
-    }
     items = []
     cursor = None
     for _ in range(10):
         if len(items) >= max_items:
             break
-        variables = dict(base_vars)
+        variables = dict(TW_MEDIA_BASE_VARS)
         variables.update({"userId": rid, "count": 40, "cursor": cursor})
         d = await _tw_graphql(session, TW_Q_MEDIA, "UserMedia", variables, cfg, proxy)
-        tl = ((((d.get("data") or {}).get("user") or {}).get("result") or {})
-              .get("timeline") or {}).get("timeline") or {}
-        instructions = tl.get("instructions") or []
-        got = False
-        for ins in instructions:
-            if ins.get("type") != "TimelineAddEntries":
-                continue
-            for e in ins.get("entries", []):
-                c = e.get("content") or {}
-                ctype = c.get("__typename")
-                if ctype == "TimelineTimelineCursor":
-                    if c.get("cursorType") in ("Bottom", "ShowMore", "Top"):
-                        cursor = c.get("value")
-                elif ctype == "TimelineTimelineModule":
-                    for it in c.get("items", []):
-                        ic = (it.get("item") or {}).get("itemContent") or {}
-                        tr = (ic.get("tweet_results") or {}).get("result") or {}
-                        got = True
-                        items.extend(_extract_tw_media(tr, handle))
-                        if len(items) >= max_items:
-                            break
-                elif ctype == "TimelineTweet":
-                    tr = (c.get("tweet_results") or {}).get("result") or {}
-                    got = True
-                    items.extend(_extract_tw_media(tr, handle))
-            if len(items) >= max_items:
-                break
-        if not got and items:
+        page_items, cursor = _tw_media_page(d, handle)
+        items.extend(page_items)
+        if not page_items and items:
             break
         if not cursor:
             break
     if not items:
         raise ScanError(f"@{handle} 没有可下载的媒体（或接口返回受限）")
+    _MORE_STATE[handle.lower()] = {"platform": "twitter", "rid": rid, "cursor": cursor, "handle": handle}
     return items[:max_items]
 
 
@@ -964,8 +972,76 @@ def api_scan():
         return jsonify({"ok": False, "error": str(e)})
     except Exception as e:
         return jsonify({"ok": False, "error": f"扫描失败: {e}"})
+    key = _more_key(url)
+    can_more = bool(_MORE_STATE.get(key, {}).get("cursor")) if key else False
     return jsonify({"ok": True, "platform": items[0]["platform"] if items else "",
-                    "count": len(items), "items": items})
+                    "count": len(items), "items": items, "can_more": can_more})
+
+
+def _more_key(url):
+    m = re.search(r"bsky(?:\.app|\.social)/profile/([^/?#]+)", url)
+    if m:
+        return m.group(1).lower()
+    m = re.search(r"(?:twitter|x)\.com/([^/?#]+)", url)
+    if m and m.group(1) not in ("home", "explore", "search", "i"):
+        return m.group(1).lower()
+    return ""
+
+
+async def _scan_more_async(url):
+    key = _more_key(url)
+    st = _MORE_STATE.get(key)
+    if not st or not st.get("cursor"):
+        raise ScanError("没有更多了")
+    cfg = get_config()
+    proxy = active_proxy(cfg)
+    async with await make_session(proxy) as session:
+        if st["platform"] == "bluesky":
+            params = {"actor": st["actor"], "limit": 100,
+                      "includeReposts": "false", "filter": "posts_no_replies",
+                      "cursor": st["cursor"]}
+            try:
+                async with session.get(BLUE_API + "/app.bsky.feed.getAuthorFeed",
+                                       params=params, proxy=req_proxy(proxy), headers=HEADERS) as r:
+                    if r.status != 200:
+                        raise ScanError(f"Bluesky API 返回 HTTP {r.status}")
+                    d = await r.json()
+            except aiohttp.ClientError as e:
+                raise ScanError(f"请求 Bluesky 失败: {e}")
+            feed = d.get("feed") or []
+            items = []
+            for f in feed:
+                post = f.get("post") or {}
+                if (post.get("author") or {}).get("handle", "").lower() != st["actor"].lower():
+                    continue
+                items.extend(extract_bsky_media(post, st["actor"]))
+            st["cursor"] = d.get("cursor")
+            return items
+        if st["platform"] == "twitter":
+            variables = dict(TW_MEDIA_BASE_VARS)
+            variables.update({"userId": st["rid"], "count": 40, "cursor": st["cursor"]})
+            d = await _tw_graphql(session, TW_Q_MEDIA, "UserMedia", variables, cfg, proxy)
+            items, cursor = _tw_media_page(d, st.get("handle") or key)
+            st["cursor"] = cursor
+            return items
+    return []
+
+
+@app.route("/api/scan_more", methods=["POST"])
+def api_scan_more():
+    data = request.get_json(silent=True) or {}
+    url = (data.get("url") or "").strip()
+    if not url.startswith(("http://", "https://")):
+        url = "https://" + url
+    try:
+        items = asyncio.run(_scan_more_async(url))
+    except ScanError as e:
+        return jsonify({"ok": False, "error": str(e)})
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"加载更多失败: {e}"})
+    key = _more_key(url)
+    can_more = bool(_MORE_STATE.get(key, {}).get("cursor"))
+    return jsonify({"ok": True, "count": len(items), "items": items, "can_more": can_more})
 
 
 async def _scan_internal(url, proxy, cfg):
