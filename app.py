@@ -1025,6 +1025,7 @@ async def _scan_more_async(url):
         raise ScanError("没有更多了")
     cfg = get_config()
     proxy = active_proxy(cfg)
+    prev = st.get("cursor")
     async with await make_session(proxy) as session:
         if st["platform"] == "bluesky":
             params = {"actor": st["actor"], "limit": 100,
@@ -1045,7 +1046,8 @@ async def _scan_more_async(url):
                 if (post.get("author") or {}).get("handle", "").lower() != st["actor"].lower():
                     continue
                 items.extend(extract_bsky_media(post, st["actor"]))
-            st["cursor"] = d.get("cursor")
+            newc = d.get("cursor")
+            st["cursor"] = newc if (newc and newc != prev) else None
             return items
         if st["platform"] == "twitter":
             variables = {"userId": st["rid"], "count": 40, "includePromotedContent": True,
@@ -1054,7 +1056,7 @@ async def _scan_more_async(url):
             d = await _tw_graphql(session, TW_Q_TWEETS, "UserTweets", variables, cfg, proxy,
                                   features=TW_FEATURES_TWEETS)
             items, cursor = _tw_tweets_page(d, st.get("handle") or key)
-            st["cursor"] = cursor
+            st["cursor"] = cursor if (cursor and cursor != prev) else None
             return items
     return []
 

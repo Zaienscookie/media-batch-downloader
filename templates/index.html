@@ -571,24 +571,29 @@ function downloadAll() {
 }
 
 async function autoLoadAll(done) {
-  let guard = 0, stall = 0;
+  const sleep = ms => new Promise(r => setTimeout(r, ms));
+  let guard = 0, incomplete = false, lastErr = '';
   setStatus('<span class="spinner"></span>全量加载中...');
-  while (canMore && moreUrl && guard < 2000) {
+  while (canMore && moreUrl && guard < 5000) {
     guard++;
+    let d;
     try {
       const r = await fetch('/api/scan_more', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({url: moreUrl})});
-      const d = await r.json();
-      if (!d.ok) break;
-      const seen = new Set(items.map(i => i.source));
-      let added = 0;
-      (d.items || []).forEach(it => { if (!seen.has(it.source)) { items.push(it); seen.add(it.source); added++; } });
-      canMore = !!d.can_more;
-      render();
-      setStatus(`<span class="spinner"></span>全量加载中... 已 ${items.length} 项`);
-      if (added === 0) { stall++; if (stall >= 3) break; } else stall = 0;
-    } catch (e) { break; }
+      d = await r.json();
+    } catch (e) { incomplete = true; break; }
+    if (!d.ok) { incomplete = true; lastErr = d.error || ''; break; }
+    const seen = new Set(items.map(i => i.source));
+    (d.items || []).forEach(it => { if (!seen.has(it.source)) { items.push(it); seen.add(it.source); } });
+    canMore = !!d.can_more;
+    render();
+    setStatus(`<span class="spinner"></span>全量加载中... 已 ${items.length} 项（可随时停止）`);
+    await sleep(600);                 // 轻柔节流，减少触发限流
   }
-  setStatus(`✅ 全量加载完成，共 ${items.length} 项`, 'ok');
+  if (incomplete) {
+    setStatus(`⚠️ 已加载 ${items.length} 项，但未到全部${lastErr ? '（' + lastErr + '）' : ''}。进度已保存——等几分钟后再点一次「📦 全量下载」会从断点继续。`, 'err');
+    return;                            // 不自动下载，避免拿到残缺包
+  }
+  setStatus(`✅ 全量加载完成，共 ${items.length} 项，开始打包下载...`, 'ok');
   done();
 }
 
