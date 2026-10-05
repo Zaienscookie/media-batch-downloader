@@ -432,7 +432,7 @@ function render() {
     const card = document.createElement('div');
     card.className = 'card' + (selected.has(i.id) ? ' selected' : '');
     const thumb = i.thumb
-      ? `<img src="${esc(i.thumb)}" onerror="this.style.display='none'">`
+      ? `<img src="/api/thumb?u=${b64u(i.thumb)}" loading="lazy" onerror="this.style.display='none'">`
       : `<div class="empty">${i.type === 'video' ? '🎬' : (i.type === 'gif' ? '🎞️' : '🖼️')}</div>`;
     card.innerHTML = `
       <div class="thumb">
@@ -451,7 +451,7 @@ function render() {
   // 预取下一页/下两页缩略图，切页秒开
   for (let p = page + 1; p <= Math.min(page + 2, totalPages); p++) {
     const pre = shown.slice((p - 1) * PAGE_SIZE, p * PAGE_SIZE);
-    pre.forEach(it => { if (it.thumb) { const im = new Image(); im.src = it.thumb; } });
+    pre.forEach(it => { if (it.thumb) { const im = new Image(); im.src = '/api/thumb?u=' + b64u(it.thumb); } });
   }
 
   // 分页器（顶部 + 底部各一个）

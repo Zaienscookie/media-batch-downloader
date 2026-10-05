@@ -1410,6 +1410,48 @@ def api_zipstream():
     return resp
 
 
+_THUMB_CACHE = {}
+_THUMB_LOCK = threading.Lock()
+
+
+async def _fetch_thumb(url, proxy):
+    async with await make_session(proxy) as session:
+        async with session.get(url, proxy=req_proxy(proxy), headers=HEADERS,
+                               allow_redirects=True,
+                               timeout=aiohttp.ClientTimeout(total=20)) as r:
+            if r.status != 200:
+                return None, None
+            data = await r.read()
+            return r.headers.get("Content-Type", "image/jpeg"), data
+
+
+@app.route("/api/thumb")
+def api_thumb():
+    """缩略图走服务器代理（解决浏览器直连 pbs.twimg/bsky CDN 被墙的问题）"""
+    try:
+        u = base64.urlsafe_b64decode((request.args.get("u") or "").encode()).decode()
+    except Exception:
+        return "bad", 400
+    if not u.startswith(("http://", "https://")):
+        return "bad", 400
+    with _THUMB_LOCK:
+        hit = _THUMB_CACHE.get(u)
+    if hit:
+        ct, data = hit
+        return Response(data, mimetype=ct)
+    try:
+        ct, data = asyncio.run(_fetch_thumb(u, active_proxy(get_config())))
+    except Exception:
+        return "fail", 502
+    if not data:
+        return "fail", 502
+    with _THUMB_LOCK:
+        if len(_THUMB_CACHE) > 4000:
+            _THUMB_CACHE.clear()
+        _THUMB_CACHE[u] = (ct or "image/jpeg", data)
+    return Response(data, mimetype=(ct or "image/jpeg"))
+
+
 @app.route("/media/<path:filename>")
 def media(filename):
     if os.path.basename(filename) != filename:
