@@ -617,23 +617,39 @@ async function autoLoadAll(done) {
   const sleep = ms => new Promise(r => setTimeout(r, ms));
   stopFlag = false;
   showStop(true);
-  let guard = 0, incomplete = false, lastErr = '';
+  let incomplete = false, lastErr = '', waitCount = 0;
   setStatus('<span class="spinner"></span>全量加载中...（可点「⏹ 停止」中断）');
-  while (canMore && moreUrl && guard < 100000) {
+  while (canMore && moreUrl) {
     if (stopFlag) { incomplete = true; lastErr = '已手动停止'; break; }
-    guard++;
     let d;
     try {
       const r = await fetch('/api/scan_more', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({url: moreUrl})});
       d = await r.json();
-    } catch (e) { incomplete = true; break; }
-    if (!d.ok) { incomplete = true; lastErr = d.error || ''; break; }
+    } catch (e) { d = {ok: false, error: '网络错误'}; }
+    if (!d.ok) {
+      const msg = d.error || '';
+      if (/限流|429/.test(msg)) {
+        // 撞到限流：自动倒计时等待，恢复后重试同一页（cursor 未变，从断点续）
+        waitCount++;
+        if (waitCount > 60) { incomplete = true; lastErr = msg; break; }
+        let aborted = false;
+        for (let t = 90; t > 0; t--) {
+          if (stopFlag) { aborted = true; break; }
+          setStatus(`⏳ Twitter 限流，${t} 秒后自动重试…（已加载 ${items.length} 项，第 ${waitCount} 次等待，可点「⏹ 停止」）`, 'err');
+          await sleep(1000);
+        }
+        if (aborted) { incomplete = true; lastErr = '已手动停止'; break; }
+        continue;   // 重试同一页
+      }
+      incomplete = true; lastErr = msg; break;
+    }
+    waitCount = 0;
     const seen = new Set(items.map(i => i.source));
     (d.items || []).forEach(it => { if (!seen.has(it.source)) { items.push(it); seen.add(it.source); } });
     canMore = !!d.can_more;
     render();
-    setStatus(`<span class="spinner"></span>全量加载中... 已 ${items.length} 项`);
-    await sleep(400);
+    setStatus(`<span class="spinner"></span>全量加载中... 已 ${items.length} 项${waitCount ? `（限流等待 ${waitCount} 次）` : ''}`);
+    await sleep(500);
   }
   showStop(false);
   stopFlag = false;

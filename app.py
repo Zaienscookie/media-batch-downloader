@@ -73,6 +73,7 @@ DEFAULT_CONFIG = {
     "twitter_bearer": "",
     "twitter_auth_token": "",
     "twitter_ct0": "",
+    "twitter_accounts": [],
 }
 
 _CONFIG_LOCK = threading.Lock()
@@ -85,6 +86,15 @@ class ScanError(Exception):
 class NitterUnusable(ScanError):
     """实例本身不可用（反爬/连接失败等），自动探测时应跳过换下一个"""
     pass
+
+
+class TwRateLimited(ScanError):
+    """Twitter 429 限流，触发账号轮换"""
+    pass
+
+
+# 当前使用的 Twitter 账号索引（多账号轮换）
+_TW_ACCT_IDX = 0
 
 
 # 记录每个账号最近一次扫描的游标，供「加载更多」继续翻页
@@ -667,9 +677,24 @@ TW_TOGGLES = {
 }
 
 
-def _tw_headers(cfg):
-    ct0 = cfg.get("twitter_ct0") or ""
-    at = cfg.get("twitter_auth_token") or ""
+def _tw_accounts(cfg):
+    """收集去重后的 Twitter 会话列表：[(auth_token, ct0), ...]"""
+    accts, seen = [], set()
+    at = (cfg.get("twitter_auth_token") or "").strip()
+    ct0 = (cfg.get("twitter_ct0") or "").strip()
+    if at and ct0:
+        accts.append((at, ct0)); seen.add(at)
+    for a in (cfg.get("twitter_accounts") or []):
+        if not isinstance(a, dict):
+            continue
+        a_at = (a.get("auth_token") or "").strip()
+        a_ct0 = (a.get("ct0") or "").strip()
+        if a_at and a_ct0 and a_at not in seen:
+            accts.append((a_at, a_ct0)); seen.add(a_at)
+    return accts
+
+
+def _tw_headers(at, ct0):
     return {
         "User-Agent": TW_UA,
         "accept": "*/*",
@@ -679,20 +704,42 @@ def _tw_headers(cfg):
     }
 
 
-async def _tw_graphql(session, qid, operation, variables, cfg, proxy, features=None):
+async def _tw_call(session, qid, operation, variables, features, at, ct0, proxy):
     params = {
         "variables": json.dumps(variables),
         "features": json.dumps(features or TW_FEATURES),
         "fieldToggles": json.dumps(TW_TOGGLES),
     }
     url = f"{TW_GQL}/{qid}/{operation}?" + urllib.parse.urlencode(params)
-    async with session.get(url, proxy=req_proxy(proxy), headers=_tw_headers(cfg),
+    async with session.get(url, proxy=req_proxy(proxy), headers=_tw_headers(at, ct0),
                            timeout=aiohttp.ClientTimeout(total=30)) as r:
         if r.status == 429:
-            raise ScanError("Twitter 接口限流(429)，请稍后再试")
+            raise TwRateLimited("429")
+        if r.status == 403:
+            raise ScanError("Twitter 返回 403（该账号会话失效，请更换 auth_token/ct0）")
         if r.status != 200:
             raise ScanError(f"Twitter GraphQL HTTP {r.status}")
         return await r.json()
+
+
+async def _tw_graphql(session, qid, operation, variables, cfg, proxy, features=None):
+    """带多账号轮换：某账号 429 就换下一个；全限流才报错"""
+    global _TW_ACCT_IDX
+    accounts = _tw_accounts(cfg)
+    if not accounts:
+        raise ScanError("未配置 Twitter 会话（请在 ⚙️ 设置里填 auth_token / ct0）")
+    n = len(accounts)
+    start = _TW_ACCT_IDX % n
+    for k in range(n):
+        i = (start + k) % n
+        at, ct0 = accounts[i]
+        try:
+            data = await _tw_call(session, qid, operation, variables, features, at, ct0, proxy)
+            _TW_ACCT_IDX = i
+            return data
+        except TwRateLimited:
+            continue
+    raise ScanError("Twitter 接口限流(429)，请稍后再试")
 
 
 def _extract_tw_media(tr, handle):
@@ -914,19 +961,20 @@ def index():
 def api_config():
     if request.method == "GET":
         cfg = dict(get_config())
-        cfg.pop("twitter_bearer", None)
+        for secret in ("twitter_bearer", "twitter_auth_token", "twitter_ct0", "twitter_accounts"):
+            cfg.pop(secret, None)
         return jsonify({"ok": True, "config": cfg})
     patch = request.get_json(silent=True) or {}
     cfg = get_config()
     keys = ("proxy_enabled", "proxy", "max_mb", "max_items",
             "nitter_instance", "nitter_instances", "twitter_bearer",
-            "twitter_auth_token", "twitter_ct0")
+            "twitter_auth_token", "twitter_ct0", "twitter_accounts")
     for k in keys:
         if k in patch:
             cfg[k] = patch[k]
     save_config(cfg)
     out = dict(cfg)
-    for secret in ("twitter_bearer", "twitter_auth_token", "twitter_ct0"):
+    for secret in ("twitter_bearer", "twitter_auth_token", "twitter_ct0", "twitter_accounts"):
         out.pop(secret, None)
     return jsonify({"ok": True, "config": out})
 
