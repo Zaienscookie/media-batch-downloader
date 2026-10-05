@@ -628,14 +628,18 @@ async function autoLoadAll(done) {
     } catch (e) { d = {ok: false, error: '网络错误'}; }
     if (!d.ok) {
       const msg = d.error || '';
-      if (/限流|429/.test(msg)) {
-        // 撞到限流：自动倒计时等待，恢复后重试同一页（cursor 未变，从断点续）
+      if (d.limited || /限流|429/.test(msg)) {
+        // 撞到限流：按 Twitter 返回的重置时间精确等待，恢复后重试同一页（cursor 未变）
         waitCount++;
-        if (waitCount > 60) { incomplete = true; lastErr = msg; break; }
+        if (waitCount > 120) { incomplete = true; lastErr = msg; break; }
+        const now = Math.floor(Date.now() / 1000);
+        let waitSec = (d.reset && d.reset > now) ? (d.reset - now + 5) : Math.min(600, 60 * waitCount);
+        waitSec = Math.min(waitSec, 1200);
         let aborted = false;
-        for (let t = 90; t > 0; t--) {
+        for (let t = waitSec; t > 0; t--) {
           if (stopFlag) { aborted = true; break; }
-          setStatus(`⏳ Twitter 限流，${t} 秒后自动重试…（已加载 ${items.length} 项，第 ${waitCount} 次等待，可点「⏹ 停止」）`, 'err');
+          const mm = String(Math.floor(t / 60)).padStart(2, '0'), ss = String(t % 60).padStart(2, '0');
+          setStatus(`⏳ Twitter 限流，${mm}:${ss} 后自动继续…（已加载 ${items.length} 项，可点「⏹ 停止」）`, 'err');
           await sleep(1000);
         }
         if (aborted) { incomplete = true; lastErr = '已手动停止'; break; }
@@ -648,8 +652,21 @@ async function autoLoadAll(done) {
     (d.items || []).forEach(it => { if (!seen.has(it.source)) { items.push(it); seen.add(it.source); } });
     canMore = !!d.can_more;
     render();
-    setStatus(`<span class="spinner"></span>全量加载中... 已 ${items.length} 项${waitCount ? `（限流等待 ${waitCount} 次）` : ''}`);
-    await sleep(500);
+    // 额度将尽：提前等到重置点再继续，避免猛冲撞限流、空转浪费窗口
+    if (d.remaining !== undefined && d.remaining !== null && d.remaining <= 1 && d.reset
+        && d.reset > Math.floor(Date.now() / 1000)) {
+      let remSec = Math.min(d.reset - Math.floor(Date.now() / 1000) + 3, 1200);
+      for (let t = remSec; t > 0; t--) {
+        if (stopFlag) break;
+        const mm = String(Math.floor(t / 60)).padStart(2, '0'), ss = String(t % 60).padStart(2, '0');
+        setStatus(`<span class="spinner"></span>额度将尽，${mm}:${ss} 后继续…（已加载 ${items.length} 项，可点「⏹ 停止」）`);
+        await sleep(1000);
+      }
+      if (stopFlag) { incomplete = true; lastErr = '已手动停止'; break; }
+    } else {
+      setStatus(`<span class="spinner"></span>全量加载中... 已 ${items.length} 项（剩余额度 ${d.remaining ?? '?'}）`);
+      await sleep(600);
+    }
   }
   showStop(false);
   stopFlag = false;

@@ -93,6 +93,18 @@ class TwRateLimited(ScanError):
     pass
 
 
+class TwAllLimited(ScanError):
+    """所有账号都限流；带 reset（重置时间戳）供前端精确等待"""
+    def __init__(self, msg="Twitter 接口限流(429)", reset=0, remaining=0):
+        super().__init__(msg)
+        self.reset = reset
+        self.remaining = remaining
+
+
+# UserTweets 的限流状态（来自响应头）
+_TW_RL = {"remaining": None, "reset": 0}
+
+
 # 当前使用的 Twitter 账号索引（多账号轮换）
 _TW_ACCT_IDX = 0
 
@@ -729,6 +741,7 @@ def _tw_headers(at, ct0):
 
 
 async def _tw_call(session, qid, operation, variables, features, at, ct0, proxy):
+    global _TW_RL
     params = {
         "variables": json.dumps(variables),
         "features": json.dumps(features or TW_FEATURES),
@@ -737,6 +750,15 @@ async def _tw_call(session, qid, operation, variables, features, at, ct0, proxy)
     url = f"{TW_GQL}/{qid}/{operation}?" + urllib.parse.urlencode(params)
     async with session.get(url, proxy=req_proxy(proxy), headers=_tw_headers(at, ct0),
                            timeout=aiohttp.ClientTimeout(total=30)) as r:
+        # 记录限流状态（针对取数据的 UserTweets）
+        if operation == "UserTweets":
+            rem = r.headers.get("x-rate-limit-remaining")
+            rst = r.headers.get("x-rate-limit-reset")
+            if rem is not None:
+                try:
+                    _TW_RL = {"remaining": int(rem), "reset": int(rst or 0)}
+                except Exception:
+                    pass
         if r.status == 429:
             raise TwRateLimited("429")
         if r.status == 403:
@@ -763,7 +785,8 @@ async def _tw_graphql(session, qid, operation, variables, cfg, proxy, features=N
             return data
         except TwRateLimited:
             continue
-    raise ScanError("Twitter 接口限流(429)，请稍后再试")
+    raise TwAllLimited("Twitter 接口限流(429)", reset=_TW_RL.get("reset", 0),
+                       remaining=_TW_RL.get("remaining", 0))
 
 
 def _extract_tw_media(tr, handle):
@@ -1144,13 +1167,17 @@ def api_scan_more():
         url = "https://" + url
     try:
         items = asyncio.run(_scan_more_async(url))
+    except TwAllLimited as e:
+        return jsonify({"ok": False, "error": "Twitter 接口限流(429)", "reset": e.reset,
+                        "remaining": e.remaining, "limited": True})
     except ScanError as e:
         return jsonify({"ok": False, "error": str(e)})
     except Exception as e:
         return jsonify({"ok": False, "error": f"加载更多失败: {e}"})
     key = _more_key(url)
     can_more = bool(_MORE_STATE.get(key, {}).get("cursor"))
-    return jsonify({"ok": True, "count": len(items), "items": items, "can_more": can_more})
+    return jsonify({"ok": True, "count": len(items), "items": items, "can_more": can_more,
+                    "reset": _TW_RL.get("reset", 0), "remaining": _TW_RL.get("remaining")})
 
 
 async def _scan_internal(url, proxy, cfg):
