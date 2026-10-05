@@ -794,8 +794,21 @@ def _extract_tw_media(tr, handle):
     if tr.get("__typename") == "TweetWithVisibilityResults":
         tr = tr.get("tweet") or tr
     leg = tr.get("legacy") or {}
+    # 排除转推（RT）与非本人内容：只保留该用户本人原创帖
+    if leg.get("retweeted_status_result"):
+        return []
+    full_text = leg.get("full_text") or ""
+    if full_text.startswith("RT @"):
+        return []
+    try:
+        sn = (((tr.get("core") or {}).get("user_results") or {}).get("result") or {}) \
+            .get("legacy", {}).get("screen_name")
+        if sn and handle and sn.lower() != handle.lower():
+            return []
+    except Exception:
+        pass
     rest_id = tr.get("rest_id") or leg.get("id_str")
-    text = clip(leg.get("full_text") or "")
+    text = clip(full_text)
     date = leg.get("created_at") or ""
     page = f"https://x.com/{handle}/status/{rest_id}" if rest_id else ""
     medias = ((leg.get("extended_entities") or {}).get("media")
@@ -881,7 +894,7 @@ async def scan_twitter_graphql(session, handle, proxy, cfg, max_items):
     for _ in range(20):
         if len(items) >= max_items:
             break
-        variables = {"userId": rid, "count": 40, "includePromotedContent": True,
+        variables = {"userId": rid, "count": 40, "includePromotedContent": False,
                      "withQuickPromoteEligibilityTweetFields": True, "withVoice": True,
                      "withV2Timeline": True, "cursor": cursor}
         d = await _tw_graphql(session, TW_Q_TWEETS, "UserTweets", variables, cfg, proxy,
@@ -1147,7 +1160,7 @@ async def _scan_more_async(url):
             _save_more_state()
             return items
         if st["platform"] == "twitter":
-            variables = {"userId": st["rid"], "count": 40, "includePromotedContent": True,
+            variables = {"userId": st["rid"], "count": 40, "includePromotedContent": False,
                          "withQuickPromoteEligibilityTweetFields": True, "withVoice": True,
                          "withV2Timeline": True, "cursor": st["cursor"]}
             d = await _tw_graphql(session, TW_Q_TWEETS, "UserTweets", variables, cfg, proxy,
