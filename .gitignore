@@ -3,4 +3,5 @@ __pycache__/
 *.pyc
 downloads/
 config.json
+more_state.json
 *.log

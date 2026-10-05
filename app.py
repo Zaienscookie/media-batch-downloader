@@ -97,6 +97,29 @@ class TwRateLimited(ScanError):
 _TW_ACCT_IDX = 0
 
 
+# 加载进度持久化：重启后仍能从断点继续
+_MORE_STATE_FILE = os.path.join(BASE_DIR, "more_state.json")
+
+
+def _save_more_state():
+    try:
+        tmp = _MORE_STATE_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(_MORE_STATE, f, ensure_ascii=False)
+        os.replace(tmp, _MORE_STATE_FILE)
+    except Exception:
+        pass
+
+
+def _load_more_state():
+    try:
+        if os.path.exists(_MORE_STATE_FILE):
+            with open(_MORE_STATE_FILE, encoding="utf-8") as f:
+                _MORE_STATE.update(json.load(f))
+    except Exception:
+        pass
+
+
 # 记录每个账号最近一次扫描的游标，供「加载更多」继续翻页
 _MORE_STATE = {}
 
@@ -390,6 +413,7 @@ async def scan_bluesky(session, handle, proxy, max_items):
     if not items:
         raise ScanError("该用户没有可下载的媒体，或用户名无效")
     _MORE_STATE[handle.lower()] = {"platform": "bluesky", "actor": handle, "cursor": cursor}
+    _save_more_state()
     return items
 
 
@@ -846,6 +870,7 @@ async def scan_twitter_graphql(session, handle, proxy, cfg, max_items):
     if not items:
         raise ScanError(f"@{handle} 前若干页未找到媒体（可能以文字为主，或接口受限）")
     _MORE_STATE[handle.lower()] = {"platform": "twitter", "rid": rid, "cursor": cursor, "handle": handle}
+    _save_more_state()
     return items[:max_items]
 
 
@@ -1096,6 +1121,7 @@ async def _scan_more_async(url):
                 items.extend(extract_bsky_media(post, st["actor"]))
             newc = d.get("cursor")
             st["cursor"] = newc if (newc and newc != prev) else None
+            _save_more_state()
             return items
         if st["platform"] == "twitter":
             variables = {"userId": st["rid"], "count": 40, "includePromotedContent": True,
@@ -1105,6 +1131,7 @@ async def _scan_more_async(url):
                                   features=TW_FEATURES_TWEETS)
             items, cursor = _tw_tweets_page(d, st.get("handle") or key)
             st["cursor"] = cursor if (cursor and cursor != prev) else None
+            _save_more_state()
             return items
     return []
 
@@ -1471,6 +1498,9 @@ def api_server():
         "ffmpeg": bool(FFMPEG),
         "dl_dir": DL_DIR,
     })
+
+
+_load_more_state()
 
 
 if __name__ == "__main__":
