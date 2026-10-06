@@ -986,9 +986,103 @@ async def scan_direct(session, url, proxy):
     return [mk_item("url", mtype, os.path.basename(url), url, url, url)]
 
 
+# ---------------------------------------------------------------- kemono.cr
+KEM_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+          "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36")
+
+
+def _kem_headers():
+    h = dict(HEADERS)
+    h["User-Agent"] = KEM_UA
+    h["Accept"] = "text/css"          # kemono 反爬要求这个 Accept
+    return h
+
+
+def _kem_media_type(name):
+    ext = os.path.splitext(name or "")[1].lower().lstrip(".")
+    if ext in ("mp4", "webm", "mov", "mkv", "m3u8"):
+        return "video"
+    if ext == "gif":
+        return "gif"
+    return "image"
+
+
+def _kem_items(posts, service, uid, limit):
+    items = []
+    for p in posts:
+        pid = p.get("id")
+        title = clip(p.get("title") or "", 90)
+        date = p.get("published") or ""
+        page = f"https://kemono.cr/{service}/user/{uid}/post/{pid}"
+        seen = set()
+        files = []
+        if isinstance(p.get("file"), dict) and p["file"].get("path"):
+            files.append(p["file"])
+        for a in (p.get("attachments") or []):
+            if isinstance(a, dict) and a.get("path"):
+                files.append(a)
+        for f in files:
+            path = f.get("path") or ""
+            if not path or path in seen:
+                continue
+            seen.add(path)
+            name = f.get("name") or os.path.basename(path)
+            src = f"https://n1.kemono.cr/data{path}"
+            thumb = f"https://img.kemono.cr/thumbnail/data{path}"
+            items.append(mk_item("kemono", _kem_media_type(name), title, src, thumb, page, date))
+            if len(items) >= limit:
+                return items
+    return items
+
+
+async def scan_kemono(session, url, proxy, max_items):
+    m = re.search(r"kemono\.cr/([^/?#]+)/user/([^/?#]+)(?:/post/([^/?#]+))?", url)
+    if not m:
+        raise ScanError("无法识别 kemono 链接，示例：https://kemono.cr/patreon/user/75879791")
+    service, uid, post_id = m.group(1), m.group(2), m.group(3)
+    h = _kem_headers()
+    posts = []
+    next_o = None
+    if post_id:
+        u = f"https://kemono.cr/api/v1/{service}/user/{uid}/post/{post_id}"
+        async with session.get(u, proxy=req_proxy(proxy), headers=h,
+                               timeout=aiohttp.ClientTimeout(total=30)) as r:
+            if r.status != 200:
+                raise ScanError(f"kemono API HTTP {r.status}")
+            posts = [json.loads(await r.text())]
+    else:
+        offset = 0
+        for _ in range(10):                     # 初始最多 10 页(500帖)，其余靠「加载更多」
+            u = f"https://kemono.cr/api/v1/{service}/user/{uid}/posts"
+            params = {"o": offset} if offset else {}
+            async with session.get(u, params=params, proxy=req_proxy(proxy), headers=h,
+                                   timeout=aiohttp.ClientTimeout(total=30)) as r:
+                if r.status != 200:
+                    raise ScanError(f"kemono API HTTP {r.status}")
+                batch = json.loads(await r.text())
+            if not isinstance(batch, list) or not batch:
+                next_o = None
+                break
+            posts += batch
+            if len(_kem_items(posts, service, uid, 10 ** 9)) >= max_items or len(batch) < 50:
+                next_o = (offset + 50) if len(batch) >= 50 else None
+                break
+            offset += 50
+            next_o = offset
+    items = _kem_items(posts, service, uid, max_items)
+    if not items:
+        raise ScanError("该 kemono 页面没解析到媒体（可能没有附件，或接口受限）")
+    key = f"kemono:{service}:{uid}"
+    _MORE_STATE[key] = {"platform": "kemono", "service": service, "uid": uid, "cursor": next_o}
+    _save_more_state()
+    return items
+
+
 async def scan_url(session, url, proxy, cfg):
     max_items = int(cfg.get("max_items", 300) or 300)
     host = (urllib.parse.urlsplit(url).netloc or "").lower()
+    if "kemono.cr" in host or "kemono.su" in host:
+        return await scan_kemono(session, url, proxy, max_items)
     if host in ("bsky.app", "www.bsky.app", "bsky.social"):
         m = re.search(r"/profile/([^/?#]+)", url)
         if not m:
@@ -1119,6 +1213,9 @@ def api_scan():
 
 
 def _more_key(url):
+    m = re.search(r"kemono\.(?:cr|su)/([^/?#]+)/user/([^/?#]+)", url)
+    if m:
+        return f"kemono:{m.group(1)}:{m.group(2)}"
     m = re.search(r"bsky(?:\.app|\.social)/profile/([^/?#]+)", url)
     if m:
         return m.group(1).lower()
@@ -1137,6 +1234,22 @@ async def _scan_more_async(url):
     proxy = active_proxy(cfg)
     prev = st.get("cursor")
     async with await make_session(proxy) as session:
+        if st["platform"] == "kemono":
+            off = int(st.get("cursor") or 0)
+            u = f"https://kemono.cr/api/v1/{st['service']}/user/{st['uid']}/posts"
+            async with session.get(u, params={"o": off}, proxy=req_proxy(proxy),
+                                   headers=_kem_headers(), timeout=aiohttp.ClientTimeout(total=30)) as r:
+                if r.status != 200:
+                    raise ScanError(f"kemono API HTTP {r.status}")
+                batch = json.loads(await r.text())
+            if not isinstance(batch, list) or not batch:
+                st["cursor"] = None
+                _save_more_state()
+                return []
+            items = _kem_items(batch, st["service"], st["uid"], 10 ** 9)
+            st["cursor"] = (off + 50) if len(batch) >= 50 else None
+            _save_more_state()
+            return items
         if st["platform"] == "bluesky":
             params = {"actor": st["actor"], "limit": 100,
                       "includeReposts": "false", "filter": "posts_no_replies",

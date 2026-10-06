@@ -399,7 +399,7 @@ function render() {
   // badge
   const b = $('p-badge');
   const plat = items.length ? items[0].platform : '';
-  const map = {bluesky:['Bluesky','bluesky'], twitter:['Twitter','twitter'], youtube:['YouTube','youtube'], url:['直链','url']};
+  const map = {bluesky:['Bluesky','bluesky'], twitter:['Twitter','twitter'], youtube:['YouTube','youtube'], kemono:['Kemono','url'], url:['直链','url']};
   const [label, cls] = map[plat] || ['未知','gray'];
   b.textContent = label; b.className = 'badge ' + cls;
   $('p-name').textContent = items.length ? (items[0].page ? url2name(items[0].page) : '') : '';
@@ -505,7 +505,9 @@ function renderPager(el, shown, totalPages) {
 }
 
 function url2name(u) {
-  let m = u.match(/\/profile\/([^/?#]+)/);            // Bluesky: /profile/<handle>/...
+  let m = u.match(/kemono\.(?:cr|su)\/[^/]+\/user\/([^/?#]+)/);  // Kemono: /{service}/user/<id>/...
+  if (m) return m[1];
+  m = u.match(/\/profile\/([^/?#]+)/);            // Bluesky: /profile/<handle>/...
   if (m) return m[1].replace(/\.bsky\.social$/i, '') || m[1];
   m = u.match(/(?:twitter\.com|x\.com)\/([^/?#]+)/);  // Twitter: /<handle>/status/...
   if (m) return m[1];
