@@ -1050,6 +1050,15 @@ async def scan_kemono(session, url, proxy, max_items):
         raise ScanError("无法识别 kemono 链接，示例：https://kemono.cr/patreon/user/75879791")
     service, uid, post_id = m.group(1), m.group(2), m.group(3)
     h = _kem_headers()
+    author = ""
+    try:
+        pu = f"https://kemono.cr/api/v1/{service}/user/{uid}/profile"
+        async with session.get(pu, proxy=req_proxy(proxy), headers=h,
+                               timeout=aiohttp.ClientTimeout(total=20)) as r:
+            if r.status == 200:
+                author = (json.loads(await r.text()).get("name") or "").strip()
+    except Exception:
+        author = ""
     posts = []
     next_o = None
     if post_id:
@@ -1082,7 +1091,8 @@ async def scan_kemono(session, url, proxy, max_items):
     if not items:
         raise ScanError("该 kemono 页面没解析到媒体（可能没有附件，或接口受限）")
     key = f"kemono:{service}:{uid}"
-    _MORE_STATE[key] = {"platform": "kemono", "service": service, "uid": uid, "cursor": next_o}
+    _MORE_STATE[key] = {"platform": "kemono", "service": service, "uid": uid,
+                        "cursor": next_o, "name": author}
     _save_more_state()
     return items
 
@@ -1218,6 +1228,7 @@ def api_scan():
     key = _more_key(url)
     can_more = bool(_MORE_STATE.get(key, {}).get("cursor")) if key else False
     return jsonify({"ok": True, "platform": items[0]["platform"] if items else "",
+                    "name": _MORE_STATE.get(key, {}).get("name", "") if key else "",
                     "count": len(items), "items": items, "can_more": can_more})
 
 

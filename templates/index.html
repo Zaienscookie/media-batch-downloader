@@ -288,6 +288,7 @@
 <script>
 let items = [];
 let selected = new Set();
+let scanName = '';
 let filter = 'all';
 const PAGE_SIZE = 30;
 let page = 1;
@@ -363,6 +364,7 @@ async function scan() {
     const d = await r.json();
     if (!d.ok) { setStatus('❌ ' + d.error, 'err'); return; }
     items = d.items;
+    scanName = d.name || '';
     moreUrl = url;
     canMore = !!d.can_more;
     render();
@@ -402,7 +404,7 @@ function render() {
   const map = {bluesky:['Bluesky','bluesky'], twitter:['Twitter','twitter'], youtube:['YouTube','youtube'], kemono:['Kemono','url'], url:['直链','url']};
   const [label, cls] = map[plat] || ['未知','gray'];
   b.textContent = label; b.className = 'badge ' + cls;
-  $('p-name').textContent = items.length ? (items[0].page ? url2name(items[0].page) : '') : '';
+  $('p-name').textContent = items.length ? (scanName || (items[0].page ? url2name(items[0].page) : '')) : '';
   $('p-count').textContent = `共 ${items.length} 项`;
 
   // tabs
@@ -690,7 +692,7 @@ function postZip(sel) {
     frame.id = 'dl_frame'; frame.name = 'dl_frame'; frame.style.display = 'none';
     document.body.appendChild(frame);
   }
-  const uname = (items[0] && items[0].page) ? (url2name(items[0].page) || 'media') : 'media';
+  const uname = scanName || ((items[0] && items[0].page) ? (url2name(items[0].page) || 'media') : 'media');
   const form = document.createElement('form');
   form.method = 'POST'; form.action = '/api/zipstream'; form.target = 'dl_frame';
   form.style.display = 'none';
