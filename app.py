@@ -383,7 +383,14 @@ async def dl_item(session, item, proxy, max_bytes):
         return await dl_youtube(source, proxy, max_bytes)
     if mtype == "video" and "video.bsky.app/watch" in source and ".m3u8" in source:
         return await dl_hls(session, source, proxy, max_bytes)
-    return await dl_http(session, source, mtype, proxy, max_bytes)
+    try:
+        return await dl_http(session, source, mtype, proxy, max_bytes)
+    except Exception:
+        # kemono 原图 CDN(n*.kemono.cr) 常被墙，回退下载 img.kemono.cr 的预览图
+        thumb = item.get("thumb") or ""
+        if platform == "kemono" and "img.kemono.cr" in thumb:
+            return await dl_http(session, thumb, mtype, proxy, max_bytes)
+        raise
 
 
 # ---------------------------------------------------------------- scanners
