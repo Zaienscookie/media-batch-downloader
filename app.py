@@ -227,13 +227,14 @@ def http_ext(content_type, url, type_hint=""):
         return ".webp"
     if "jpeg" in ct or "jpg" in ct:
         return ".jpg"
+    # URL 真实扩展名优先于类型提示（Twitter 的 GIF 其实是 mp4，避免命名成 .gif 打不开）
+    m = re.search(r"(?:\.|@)(jpe?g|png|gif|webp|mp4|webm|mov|mkv)(?:$|[?#])", url, re.I)
+    if m:
+        return "." + m.group(1).lower()
     if type_hint == "gif":
         return ".gif"
     if type_hint == "video":
         return ".mp4"
-    m = re.search(r"(?:\.|@)(jpe?g|png|gif|webp|mp4|webm|mov|mkv)(?:$|[?#])", url, re.I)
-    if m:
-        return "." + m.group(1).lower()
     if type_hint in ("image", "photo"):
         return ".jpg"
     return ".bin"
@@ -1465,7 +1466,7 @@ def api_zipstream():
         mtype = it.get("type") or ""
         ext = http_ext("", url, mtype)
         arc = _stream_filename(it.get("title") or "media", ext)
-        sub = "videos" if mtype == "video" else "images"
+        sub = "videos" if mtype in ("video", "gif") else "images"
         hls = mtype == "video" and "video.bsky.app/watch" in url and ".m3u8" in url
         try:
             zs.add(_source_chunks(url, proxy, hls, max_bytes), f"{sub}/{arc}")
