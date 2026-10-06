@@ -505,8 +505,11 @@ function renderPager(el, shown, totalPages) {
 }
 
 function url2name(u) {
-  const m = u.match(/(?:profile|\.com|\.app)\/([^/?#]+)/);
-  return m ? m[1] : '';
+  let m = u.match(/\/profile\/([^/?#]+)/);            // Bluesky: /profile/<handle>/...
+  if (m) return m[1].replace(/\.bsky\.social$/i, '') || m[1];
+  m = u.match(/(?:twitter\.com|x\.com)\/([^/?#]+)/);  // Twitter: /<handle>/status/...
+  if (m) return m[1];
+  return '';
 }
 
 let bwTimer = null;
